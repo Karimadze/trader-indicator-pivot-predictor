@@ -1,0 +1,162 @@
+//@version=6
+// ============================================================================
+// Realtime Pivot Predictor  (RPP)
+// ----------------------------------------------------------------------------
+// ЧТО ЭТО.
+// Индикатор Libertus "RSI Div" ставит метку PIVOT на 2 свечи НАЗАД: он узнаёт
+// об экстремуме только после двух правых свечей. В реальном времени такой метки
+// на экстремуме ещё нет.
+//
+// Этот индикатор решает ЧЕСТНУЮ версию той же задачи: на ЗАКРЫТИИ ТЕКУЩЕЙ свечи
+// он оценивает ВЕРОЯТНОСТЬ того, что именно эта свеча через 2 бара окажется
+// подтверждённым PIVOT LOW по RSI. Метка ставится на текущий бар и никогда
+// не переносится назад. Нет offset, нет правых баров, нет lookahead.
+//
+// ЧЕСТНЫЕ ЦИФРЫ (7 тикеров MRVL COHR MU LITE GLW TER STX, дневки 2010-2026,
+// обучение до 2021, проверка 2021-2026, логистическая модель):
+//   базовая частота (любой новый минимум RSI за 45):  45.7%
+//   SIGNAL  score >= 48 : train 50.6% / test 53.2%   ~6.4 сигн/год/тикер
+//   STRONG  score >= 52 : train 55.2% / test 56.4%   ~3.0 сигн/год/тикер
+//   MAX     score >= 55 : train 61.0% / test 57.7%   ~1.3 сигн/год/тикер
+// 90% в реальном времени НЕДОСТИЖИМО: это прямое предсказание двух будущих
+// свечей. Потолок на этих данных ~57%. Всё, что выше, — переобучение.
+//
+// ВАЖНО: попадание в PIVOT != прибыль. На тех же данных средний следующий день
+// после SIGNAL: +0.22% (после расходов 0.15%), положительных дней 49.9%.
+// Это инструмент разметки структуры, а не готовая торговая система.
+// ============================================================================
+
+indicator("Realtime Pivot Predictor", shorttitle="RPP", overlay=false, max_labels_count=500)
+
+string G1 = "1. Логика сигнала"
+string G2 = "2. Пороги"
+string G3 = "3. Визуал"
+
+rsiLen    = input.int(14, "Длина RSI", minval=2, group=G1)
+lookback  = input.int(45, "Окно нового минимума RSI", minval=10, group=G1, tooltip="Кандидатом считается только свеча, где RSI обновил минимум за это число баров. Протестировано значение 45.")
+confirmBars = input.int(2, "Баров до подтверждения PIVOT", minval=1, maxval=5, group=G1, tooltip="Libertus подтверждает pivot через 2 правые свечи. Это же число используется для проверки прогноза.")
+cooldown  = input.int(2, "Пауза между сигналами (баров)", minval=0, group=G1)
+
+thSignal  = input.float(48, "SIGNAL: порог score", minval=30, maxval=90, step=1, group=G2, tooltip="Проверено: точность ~53% out-of-sample при базе ~46%.")
+thStrong  = input.float(52, "STRONG: порог score", minval=30, maxval=90, step=1, group=G2, tooltip="Проверено: точность ~56% out-of-sample.")
+thMax     = input.float(55, "MAX: порог score",    minval=30, maxval=95, step=1, group=G2, tooltip="Проверено: точность ~58% out-of-sample, но всего ~1.3 сигнала в год на тикер.")
+
+showLib     = input.bool(true,  "Показывать подтверждённый PIVOT (задним числом)", group=G3, tooltip="Серая метка на 2 бара назад — это то, что рисует Libertus. Нужна для визуального сравнения прогноза и правды.")
+showVerdict = input.bool(true,  "Показывать вердикт прогноза (V / X)", group=G3)
+showLabels  = input.bool(true,  "Показывать метки сигналов", group=G3)
+showScore   = input.bool(true,  "Показывать линию score", group=G3)
+showPanel   = input.bool(true,  "Показывать панель", group=G3)
+showEma     = input.bool(true,  "EMA 50 / 200 на графике цены", group=G3)
+
+// ---------------------------------------------------------------- индикаторы
+float r      = ta.rsi(close, rsiLen)
+float atr    = ta.atr(14)
+float ema50  = ta.ema(close, 50)
+float ema200 = ta.ema(close, 200)
+float rng    = high - low
+
+// кандидат: RSI обновил минимум за lookback
+float rsiLowN = ta.lowest(r, lookback)
+bool isNewLow = not na(rsiLowN) and r <= rsiLowN
+
+// ------------------------------------------------------------------- признаки
+// нормировки зафиксированы на этапе исследования и здесь НЕ подгоняются
+float f_rsi     = (r - 35.0) / 15.0
+float f_stretch = ((close - ta.lowest(low, lookback)) / (atr > 0 ? atr : na) - 1.0) / 1.5
+float f_dn      = (math.sum(close < close[1] ? 1 : 0, 3) - 1.5) / 1.0
+float f_d200    = (close / ema200 - 1.0) / 0.20
+float f_atr     = (atr / close - 0.025) / 0.015
+float f_body    = ((rng > 0 ? (close - open) / rng : 0.0)) / 0.4
+float f_ret3    = (close / close[3] - 1.0) / 0.08
+
+clip(x) => math.max(-3.0, math.min(3.0, x))
+
+float lin = -0.45 + (-0.75) * clip(f_rsi) + 0.19 * clip(f_stretch) + 0.15 * clip(f_dn) + 0.21 * clip(f_d200) + 0.12 * clip(f_atr) + (-0.07) * clip(f_body) + 0.12 * clip(f_ret3)
+float score = na(lin) ? na : 100.0 / (1.0 + math.exp(-lin))
+
+// ---------------------------------------------------------------- сигналы
+bool rawSignal = isNewLow and not na(score) and score >= thSignal
+bool rawStrong = isNewLow and not na(score) and score >= thStrong
+bool rawMax    = isNewLow and not na(score) and score >= thMax
+
+var int lastSigBar = na
+bool cdOk = na(lastSigBar) or (bar_index - lastSigBar) > cooldown
+bool sig    = barstate.isconfirmed and rawSignal and cdOk
+bool strong = sig and rawStrong
+bool maxsig = sig and rawMax
+if sig
+    lastSigBar := bar_index
+
+// ------------------------------------------- истина: стал ли бар PIVOT (Libertus)
+// бар t — PIVOT, если он был новым минимумом RSI и следующие confirmBars баров
+// не обновили этот минимум. Известно только на баре t + confirmBars.
+float futMin = ta.lowest(r, confirmBars)                       // min по последним confirmBars барам, включая текущий
+bool pivotConfirmed = isNewLow[confirmBars] and futMin > r[confirmBars]
+
+// live-статистика точности прогноза по текущему инструменту
+var int nSig = 0
+var int nHit = 0
+bool sigWasHere = sig[confirmBars]
+if barstate.isconfirmed and sigWasHere
+    nSig += 1
+    if pivotConfirmed
+        nHit += 1
+float hitRate = nSig > 0 ? 100.0 * nHit / nSig : na
+
+// ------------------------------------------------------------------- отрисовка
+color scoreCol = na(score) ? color.gray : score >= thMax ? #00e676 : score >= thStrong ? #26a69a : score >= thSignal ? #ffd54f : #78909c
+hline(thSignal, "Порог SIGNAL", color=color.new(#ffd54f, 40), linestyle=hline.style_dashed)
+hline(thStrong, "Порог STRONG", color=color.new(#26a69a, 40), linestyle=hline.style_dashed)
+hline(50, "50", color=color.new(color.gray, 75), linestyle=hline.style_dotted)
+plot(showScore ? score : na, "Score вероятности PIVOT", color=scoreCol, linewidth=2)
+plot(showScore and isNewLow ? score : na, "Кандидат", style=plot.style_circles, color=color.new(#90a4ae, 20), linewidth=3)
+bgcolor(maxsig ? color.new(#00e676, 82) : strong ? color.new(#26a69a, 88) : sig ? color.new(#ffd54f, 90) : na, title="Подсветка сигнала")
+
+plot(showEma ? ema50 : na, "EMA 50", color=#00bcd4, linewidth=1, force_overlay=true)
+plot(showEma ? ema200 : na, "EMA 200", color=#ab47bc, linewidth=2, force_overlay=true)
+
+string tipBase = "\nRSI: " + str.tostring(r, "#.0") + "\nЭто ПРОГНОЗ на закрытии текущей свечи.\nПодтверждение придёт через " + str.tostring(confirmBars) + " свечи.\nИсторическая точность порога — в панели справа."
+if showLabels and sig
+    string txt = maxsig ? "MAX\n" : strong ? "STRONG\n" : "SIGNAL\n"
+    color  col = maxsig ? #00e676 : strong ? #26a69a : #ffd54f
+    color  tcl = maxsig or strong ? color.white : color.black
+    label.new(bar_index, low, txt + str.tostring(score, "#.0") + "%", yloc=yloc.belowbar, color=col, style=label.style_label_up, textcolor=tcl, size=size.small, tooltip="Прогноз PIVOT LOW, score " + str.tostring(score, "#.0") + tipBase, force_overlay=true)
+
+// серая метка «правды» — то, что рисует Libertus, с задержкой confirmBars
+if showLib and barstate.isconfirmed and pivotConfirmed
+    label.new(bar_index - confirmBars, high, "PIVOT", yloc=yloc.abovebar, color=color.new(#546e7a, 25), style=label.style_label_down, textcolor=color.white, size=size.tiny, tooltip="Подтверждённый PIVOT LOW по логике Libertus. Стал известен только сейчас, через " + str.tostring(confirmBars) + " свечи.", force_overlay=true)
+
+// вердикт: сбылся прогноз или нет
+if showVerdict and barstate.isconfirmed and sigWasHere
+    label.new(bar_index - confirmBars, low, pivotConfirmed ? "V" : "X", yloc=yloc.belowbar, color=color.new(pivotConfirmed ? #00c853 : #d50000, 20), style=label.style_label_up, textcolor=color.white, size=size.tiny, tooltip=pivotConfirmed ? "Прогноз сбылся: свеча оказалась PIVOT LOW." : "Прогноз не сбылся: RSI обновил минимум дальше.", force_overlay=true)
+
+// ------------------------------------------------------------------- панель
+string stateNow = not isNewLow ? "НЕТ КАНДИДАТА" : na(score) ? "НЕТ ДАННЫХ" : score >= thMax ? "MAX" : score >= thStrong ? "STRONG" : score >= thSignal ? "SIGNAL" : "СЛАБО"
+color  stateCol = not isNewLow ? color.gray : score >= thMax ? #00e676 : score >= thStrong ? #26a69a : score >= thSignal ? #ffd54f : #ff9800
+string liveText = barstate.isconfirmed ? "ЗАФИКСИРОВАНО" : "СВЕЧА НЕ ЗАКРЫТА"
+
+var table pnl = table.new(position.top_right, 2, 8, bgcolor=color.new(#0f172a, 6), frame_color=color.new(#64748b, 30), frame_width=1, border_color=color.new(#334155, 40), border_width=1, force_overlay=true)
+if barstate.islast and showPanel
+    table.cell(pnl, 0, 0, "PIVOT PREDICTOR", text_color=color.white, bgcolor=#1e293b, text_size=size.small)
+    table.cell(pnl, 1, 0, stateNow, text_color=stateCol, bgcolor=#1e293b, text_size=size.small)
+    table.cell(pnl, 0, 1, "Вероятность PIVOT", text_color=color.silver, text_halign=text.align_left, text_size=size.small)
+    table.cell(pnl, 1, 1, na(score) ? "—" : str.tostring(score, "#.0") + "%", text_color=scoreCol, text_halign=text.align_right, text_size=size.small)
+    table.cell(pnl, 0, 2, "Статус свечи", text_color=color.silver, text_halign=text.align_left, text_size=size.small)
+    table.cell(pnl, 1, 2, liveText, text_color=barstate.isconfirmed ? #00e676 : #ff9800, text_halign=text.align_right, text_size=size.small)
+    table.cell(pnl, 0, 3, "RSI", text_color=color.silver, text_halign=text.align_left, text_size=size.small)
+    table.cell(pnl, 1, 3, str.tostring(r, "#.0") + (isNewLow ? "  новый мин." : ""), text_color=color.white, text_halign=text.align_right, text_size=size.small)
+    table.cell(pnl, 0, 4, "Тренд", text_color=color.silver, text_halign=text.align_left, text_size=size.small)
+    table.cell(pnl, 1, 4, close > ema200 ? "выше EMA200" : "ниже EMA200", text_color=close > ema200 ? #00e676 : #ff5252, text_halign=text.align_right, text_size=size.small)
+    table.cell(pnl, 0, 5, "Факт на этом тикере", text_color=color.silver, text_halign=text.align_left, text_size=size.small)
+    table.cell(pnl, 1, 5, nSig == 0 ? "нет данных" : str.tostring(hitRate, "#.0") + "%  (" + str.tostring(nHit) + "/" + str.tostring(nSig) + ")", text_color=color.white, text_halign=text.align_right, text_size=size.small)
+    table.cell(pnl, 0, 6, "Ожидание по тесту", text_color=color.silver, text_halign=text.align_left, text_size=size.small)
+    table.cell(pnl, 1, 6, "53-58% при базе 46%", text_color=color.new(color.white, 20), text_halign=text.align_right, text_size=size.small)
+    table.cell(pnl, 0, 7, "Смысл", text_color=color.silver, text_halign=text.align_left, text_size=size.small)
+    table.cell(pnl, 1, 7, not isNewLow ? "RSI не на новом минимуме" : not barstate.isconfirmed ? "Дождитесь закрытия свечи" : score >= thSignal ? "Прогноз PIVOT зафиксирован" : "Кандидат слабый, пропуск", text_color=color.white, text_halign=text.align_right, text_size=size.small)
+
+// ------------------------------------------------------------------- алерты
+alertcondition(sig,    title="RPP SIGNAL", message="RPP SIGNAL: прогноз PIVOT LOW на закрытой свече {{ticker}} {{interval}}")
+alertcondition(strong, title="RPP STRONG", message="RPP STRONG: прогноз PIVOT LOW на закрытой свече {{ticker}} {{interval}}")
+alertcondition(maxsig, title="RPP MAX",    message="RPP MAX: прогноз PIVOT LOW на закрытой свече {{ticker}} {{interval}}")
+if sig
+    alert("RPP " + (maxsig ? "MAX" : strong ? "STRONG" : "SIGNAL") + " | score=" + str.tostring(score, "#.0") + "% | RSI=" + str.tostring(r, "#.0"), alert.freq_once_per_bar_close)

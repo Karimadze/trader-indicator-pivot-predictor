@@ -1,0 +1,315 @@
+//@version=6
+// ============================================================================
+// Reversal Radar v2 — causal pivot-low candidate detector
+// ----------------------------------------------------------------------------
+// ВАЖНО:
+// 1) Все торговые метки ставятся только на закрытии ТЕКУЩЕЙ свечи.
+// 2) Ни одна торговая метка не переносится назад.
+// 3) Серый PRICE PIVOT — только историческая проверка. Он подтверждается через
+//    две свечи и по умолчанию выключен.
+// 4) Это новая логика. Старые проценты Reversal Radar к ней не относятся.
+// ============================================================================
+
+indicator("Reversal Radar v2", shorttitle="RevRadar v2", overlay=false, max_labels_count=500)
+
+string G1 = "1. Капитуляция"
+string G2 = "2. Реакция цены"
+string G3 = "3. Объём и контекст"
+string G4 = "4. Пороги"
+string G5 = "5. Визуал"
+
+// ------------------------------------------------------------ капитуляция
+useCCI   = input.bool(true, "CCI впервые ниже -200", group=G1)
+useBB    = input.bool(true, "Закрытие впервые ниже нижней BB", group=G1)
+useRSI30 = input.bool(true, "RSI впервые ниже 30", group=G1)
+useCRSI  = input.bool(true, "Connors RSI впервые ниже 10", group=G1)
+useTD    = input.bool(true, "TD Sequential buy setup 9", group=G1)
+useFish  = input.bool(true, "Fisher разворачивается вверх из глубины", group=G1)
+useUO    = input.bool(true, "Ultimate Oscillator пересекает 30 вверх", group=G1)
+exhaustWindow = input.int(3, "Окно капитуляции, свечей", minval=1, maxval=10, group=G1)
+
+// ----------------------------------------------------------- реакция цены
+useSFP      = input.bool(true, "Ложный пробой минимума (SFP)", group=G2, tooltip="Low пробил уже известный минимум, но свеча закрылась обратно выше него.")
+sweepLen    = input.int(20, "Глубина поиска минимума", minval=5, maxval=200, group=G2)
+useWick     = input.bool(true, "Длинный нижний фитиль", group=G2)
+minWick     = input.float(0.38, "Минимальная доля нижнего фитиля", minval=0.10, maxval=0.90, step=0.01, group=G2)
+minCloseLoc = input.float(0.60, "Закрытие не ниже доли диапазона", minval=0.30, maxval=0.95, step=0.01, group=G2, tooltip="0.60 означает закрытие в верхних 40% свечи.")
+useEngulf   = input.bool(true, "Бычье поглощение", group=G2)
+useGap      = input.bool(true, "Возврат после гэпа вниз", group=G2, tooltip="Полезно для обычных акций. На круглосуточных инструментах срабатывает редко.")
+reactionWindow = input.int(2, "Окно реакции цены, свечей", minval=1, maxval=5, group=G2)
+
+// ------------------------------------------------------ объём и контекст
+useVolume  = input.bool(true, "Поглощение на повышенном объёме", group=G3)
+volumeLen  = input.int(20, "Средний объём", minval=5, maxval=100, group=G3)
+volumeMult = input.float(1.20, "Объём выше среднего в", minval=1.0, maxval=5.0, step=0.05, group=G3)
+useClimax  = input.bool(true, "Продавцов выдохло через ATR-кульминацию", group=G3)
+atrMult    = input.float(1.45, "Диапазон свечи / ATR", minval=1.0, maxval=4.0, step=0.05, group=G3)
+useSupport = input.bool(true, "Рядом ранее известная поддержка", group=G3)
+supportLen = input.int(50, "Период поддержки", minval=10, maxval=250, group=G3)
+supportTol = input.float(1.5, "Допуск к поддержке, %", minval=0.1, maxval=10.0, step=0.1, group=G3) / 100.0
+useRelative = input.bool(true, "Относительная сила против индекса", group=G3)
+benchmark   = input.symbol("NASDAQ:QQQ", "Сравнительный индекс", group=G3)
+relativeLen = input.int(10, "Период относительной силы", minval=2, maxval=100, group=G3)
+penalizeBadClose = input.bool(true, "Штраф за сильное закрытие у минимума", group=G3, tooltip="Большая красная свеча без выкупа чаще означает продолжение падения, а не pivot.")
+
+// ---------------------------------------------------------------- пороги
+candidateScore = input.int(4, "CANDIDATE от", minval=2, maxval=10, group=G4)
+strongScore    = input.int(6, "STRONG от", minval=3, maxval=11, group=G4)
+maxScore       = input.int(8, "MAX от", minval=4, maxval=11, group=G4)
+requirePriceReaction = input.bool(true, "Обязательно требовать реакцию цены", group=G4)
+trendMode = input.string("Оба режима", "Режим EMA 200", options=["Оба режима", "Только выше EMA 200", "Только ниже EMA 200"], group=G4)
+
+// ---------------------------------------------------------------- визуал
+showLabels  = input.bool(true, "Метки на графике цены", group=G5)
+showConfirm = input.bool(true, "Показывать подтверждение следующей свечой", group=G5)
+showBars    = input.bool(true, "Гистограмма оценки", group=G5)
+showPanel   = input.bool(true, "Панель причин", group=G5)
+showEMA     = input.bool(false, "Показывать EMA 200 на цене", group=G5)
+showSupport = input.bool(false, "Показывать текущую поддержку", group=G5)
+showTruth   = input.bool(false, "PRICE PIVOT для проверки (ставится назад)", group=G5, tooltip="Серая метка появляется только через две свечи и переносится на фактическую свечу pivot. Не является торговым сигналом.")
+
+// ============================================================ базовые расчёты
+recent(bool condition, int length) => nz(math.sum(condition ? 1.0 : 0.0, length), 0.0) > 0
+
+float ema200 = ta.ema(close, 200)
+float rsi14  = ta.rsi(close, 14)
+float atr14  = ta.atr(14)
+float candleRange = high - low
+float safeRange = math.max(candleRange, syminfo.mintick)
+float lowerWick = math.min(open, close) - low
+float wickPart  = lowerWick / safeRange
+float closeLoc  = (close - low) / safeRange
+
+// ====================================================== семья капитуляции
+float cci = ta.cci(hlc3, 20)
+bool sCCI = useCCI and cci < -200 and cci[1] >= -200
+
+float bbBasis = ta.sma(close, 20)
+float bbDev   = 2.0 * ta.stdev(close, 20)
+float bbLower = bbBasis - bbDev
+bool sBB = useBB and close < bbLower and close[1] >= bbLower[1]
+
+bool sRSI = useRSI30 and rsi14 < 30 and rsi14[1] >= 30
+
+var float streak = 0.0
+streak := close > close[1] ? (nz(streak[1]) > 0 ? nz(streak[1]) + 1 : 1) : close < close[1] ? (nz(streak[1]) < 0 ? nz(streak[1]) - 1 : -1) : 0.0
+float pctRank = ta.percentrank(ta.roc(close, 1), 100)
+float crsi = (ta.rsi(close, 3) + ta.rsi(streak, 2) + pctRank) / 3.0
+bool sCRSI = useCRSI and crsi < 10 and crsi[1] >= 10
+
+var int tdCount = 0
+tdCount := close < close[4] ? nz(tdCount[1]) + 1 : 0
+bool sTD = useTD and tdCount == 9
+
+// Классическая амплитуда Fisher: без лишнего умножения логарифма на 0.5.
+float fisherMid = (high + low) / 2.0
+float fisherMin = ta.lowest(fisherMid, 9)
+float fisherMax = ta.highest(fisherMid, 9)
+float fisherRaw = fisherMax > fisherMin ? 2.0 * ((fisherMid - fisherMin) / (fisherMax - fisherMin)) - 1.0 : 0.0
+var float fisherValue = 0.0
+fisherValue := math.max(-0.999, math.min(0.999, 0.33 * fisherRaw + 0.67 * nz(fisherValue[1])))
+var float fisher = 0.0
+fisher := 0.5 * math.log((1.0 + fisherValue) / (1.0 - fisherValue)) + 0.5 * nz(fisher[1])
+bool sFish = useFish and fisher < -1.5 and fisher > fisher[1] and fisher[1] <= fisher[2]
+
+float buyingPressure = close - math.min(low, close[1])
+float trueRangeUO = math.max(high, close[1]) - math.min(low, close[1])
+float avg7  = math.sum(trueRangeUO, 7)  > 0 ? math.sum(buyingPressure, 7)  / math.sum(trueRangeUO, 7)  : 0.0
+float avg14 = math.sum(trueRangeUO, 14) > 0 ? math.sum(buyingPressure, 14) / math.sum(trueRangeUO, 14) : 0.0
+float avg28 = math.sum(trueRangeUO, 28) > 0 ? math.sum(buyingPressure, 28) / math.sum(trueRangeUO, 28) : 0.0
+float ultimate = 100.0 * (4.0 * avg7 + 2.0 * avg14 + avg28) / 7.0
+bool sUO = useUO and ultimate > 30 and ultimate[1] <= 30
+
+bool aCCI  = recent(sCCI, exhaustWindow)
+bool aBB   = recent(sBB, exhaustWindow)
+bool aRSI  = recent(sRSI, exhaustWindow)
+bool aCRSI = recent(sCRSI, exhaustWindow)
+bool aTD   = recent(sTD, exhaustWindow)
+bool aFish = recent(sFish, exhaustWindow)
+bool aUO   = recent(sUO, exhaustWindow)
+
+// Коррелирующие CCI/BB/RSI/CRSI вместе дают только один балл.
+bool capitulation = aCCI or aBB or aRSI or aCRSI
+bool oscillatorTurn = aFish or aUO
+
+// ============================================================ реакция цены
+// priorLow использует только уже закрытые свечи, поэтому SFP не заглядывает вперёд.
+float priorLow = ta.lowest(low[1], sweepLen)
+bool sfpNow = useSFP and not na(priorLow) and low < priorLow and close > priorLow
+bool wickNow = useWick and wickPart >= minWick and closeLoc >= minCloseLoc
+bool engulfNow = useEngulf and close > open and open <= close[1] and close >= open[1]
+bool gapReclaimNow = useGap and open < low[1] and close > low[1]
+
+bool sfpActive = recent(sfpNow, reactionWindow)
+bool wickActive = recent(wickNow, reactionWindow)
+bool engulfActive = recent(engulfNow, reactionWindow)
+bool gapActive = recent(gapReclaimNow, reactionWindow)
+bool priceReaction = sfpActive or wickActive or engulfActive or gapActive
+
+// ======================================================= объём и контекст
+float volumeAverage = ta.sma(volume, volumeLen)
+bool volumeAvailable = not na(volume) and not na(volumeAverage) and volumeAverage > 0
+bool volumeSpike = volumeAvailable and volume >= volumeAverage * volumeMult
+bool absorptionNow = useVolume and volumeSpike and (sfpNow or wickNow) and closeLoc >= minCloseLoc
+bool absorptionActive = recent(absorptionNow, reactionWindow)
+
+bool climaxNow = useClimax and atr14 > 0 and candleRange >= atr14 * atrMult and closeLoc >= 0.50
+bool climaxActive = recent(climaxNow, reactionWindow)
+
+float priorSupport = ta.lowest(low[1], supportLen)
+bool supportNow = useSupport and not na(priorSupport) and priorSupport > 0 and low <= priorSupport * (1.0 + supportTol) and close >= priorSupport * (1.0 - supportTol)
+bool supportActive = recent(supportNow, reactionWindow)
+
+float benchmarkClose = request.security(benchmark, timeframe.period, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+float stockMomentum = ta.roc(close, relativeLen)
+float benchmarkMomentum = ta.roc(benchmarkClose, relativeLen)
+bool nearOwnLow = low <= ta.lowest(low, relativeLen) * 1.01
+bool relativeNow = useRelative and not na(benchmarkMomentum) and nearOwnLow and stockMomentum > benchmarkMomentum
+bool relativeActive = recent(relativeNow, reactionWindow)
+
+bool badClose = penalizeBadClose and atr14 > 0 and close < open and closeLoc <= 0.25 and candleRange >= atr14 * 1.20
+int badClosePenalty = badClose ? 2 : 0
+
+// ============================================================= общий балл
+int scoreRaw =
+     (capitulation ? 1 : 0) +
+     (aTD ? 1 : 0) +
+     (oscillatorTurn ? 1 : 0) +
+     (sfpActive ? 2 : 0) +
+     (wickActive ? 1 : 0) +
+     ((engulfActive or gapActive) ? 1 : 0) +
+     (absorptionActive ? 1 : 0) +
+     (climaxActive ? 1 : 0) +
+     (supportActive ? 1 : 0) +
+     (relativeActive ? 1 : 0)
+
+int score = math.max(0, scoreRaw - badClosePenalty)
+bool exhaustionGate = capitulation or aTD or climaxActive
+bool reactionGate = not requirePriceReaction or priceReaction
+bool trendGate = trendMode == "Оба режима" or (trendMode == "Только выше EMA 200" and close > ema200) or (trendMode == "Только ниже EMA 200" and close < ema200)
+bool setup = exhaustionGate and reactionGate and trendGate and not badClose
+
+int tier = setup and score >= maxScore ? 3 : setup and score >= strongScore ? 2 : setup and score >= candidateScore ? 1 : 0
+
+// Первая метка возникает при входе в setup. Вторая возможна только при переходе
+// на более сильный уровень, а не на каждой последующей свече.
+bool newEntry = barstate.isconfirmed and tier > 0 and tier[1] == 0
+bool upgrade  = barstate.isconfirmed and tier > 1 and tier > tier[1] and tier[1] > 0
+bool signal   = newEntry or upgrade
+bool candidateSignal = signal and tier == 1
+bool strongSignal    = signal and tier == 2
+bool maxSignal       = signal and tier == 3
+
+// Дополнительное подтверждение известно только на следующей закрытой свече.
+bool nextBarConfirm = barstate.isconfirmed and signal[1] and close > high[1]
+
+// ====================================================== независимая проверка
+// PRICE PIVOT использует цену, а не RSI. Он нужен только для статистики.
+float pivotPrice = ta.pivotlow(low, 2, 2)
+bool pricePivotConfirmed = not na(pivotPrice)
+
+var int pivotSignals = 0
+var int pivotHits = 0
+// Сигнал три свечи назад; к текущему моменту уже известны price pivots S-1/S/S+1.
+if barstate.isconfirmed and newEntry[3]
+    pivotSignals += 1
+    if pricePivotConfirmed or pricePivotConfirmed[1] or pricePivotConfirmed[2]
+        pivotHits += 1
+float pivotHitRate = pivotSignals > 0 ? 100.0 * pivotHits / pivotSignals : na
+
+var int returnSignals = 0
+var int positive5 = 0
+var float return5Sum = 0.0
+if barstate.isconfirmed and newEntry[5]
+    float ret5 = close / close[5] - 1.0
+    returnSignals += 1
+    return5Sum += ret5
+    if ret5 > 0
+        positive5 += 1
+float avgReturn5 = returnSignals > 0 ? 100.0 * return5Sum / returnSignals : na
+float positiveRate5 = returnSignals > 0 ? 100.0 * positive5 / returnSignals : na
+
+// ==================================================================== вывод
+color tierColor = tier == 3 ? #00e676 : tier == 2 ? #26a69a : tier == 1 ? #ffd54f : score > 0 ? #78909c : color.new(color.gray, 75)
+
+plot(showBars ? score : na, "Pivot score", style=plot.style_columns, color=tierColor, linewidth=3)
+hline(candidateScore, "CANDIDATE", color=color.new(#ffd54f, 50), linestyle=hline.style_dashed)
+hline(strongScore, "STRONG", color=color.new(#26a69a, 50), linestyle=hline.style_dashed)
+hline(maxScore, "MAX", color=color.new(#00e676, 55), linestyle=hline.style_dashed)
+bgcolor(maxSignal ? color.new(#00e676, 82) : strongSignal ? color.new(#26a69a, 87) : candidateSignal ? color.new(#ffd54f, 90) : na)
+
+plot(showEMA ? ema200 : na, "EMA 200", color=#7e57c2, linewidth=2, force_overlay=true)
+plot(showSupport ? priorSupport : na, "Known support", color=color.new(#42a5f5, 15), linewidth=1, style=plot.style_stepline, force_overlay=true)
+
+string reasons =
+     (capitulation ? "Капитуляция; " : "") +
+     (aTD ? "TD9; " : "") +
+     (oscillatorTurn ? "Разворот осциллятора; " : "") +
+     (sfpActive ? "Ложный пробой; " : "") +
+     (wickActive ? "Нижний фитиль; " : "") +
+     (engulfActive ? "Поглощение цены; " : "") +
+     (gapActive ? "Возврат гэпа; " : "") +
+     (absorptionActive ? "Объёмный выкуп; " : "") +
+     (climaxActive ? "ATR-кульминация; " : "") +
+     (supportActive ? "Поддержка; " : "") +
+     (relativeActive ? "Сильнее индекса; " : "")
+
+if showLabels and signal
+    string title = maxSignal ? "MAX " : strongSignal ? "STRONG " : "CANDIDATE "
+    color labelColor = maxSignal ? #00c853 : strongSignal ? #00897b : #f9a825
+    color textColor = candidateSignal ? color.black : color.white
+    label.new(bar_index, low, title + str.tostring(score), yloc=yloc.belowbar, style=label.style_label_up, color=labelColor, textcolor=textColor, size=size.small, tooltip="Сигнал появился на закрытии этой свечи.\nБаллы: " + str.tostring(score) + "\nПричины: " + reasons + "\n\nСтарые проценты Reversal Radar к v2 не применяются.", force_overlay=true)
+
+if showConfirm and nextBarConfirm
+    label.new(bar_index, low, "CONFIRM", yloc=yloc.belowbar, style=label.style_label_up, color=#1565c0, textcolor=color.white, size=size.tiny, tooltip="Следующая свеча закрылась выше максимума сигнальной. Это более позднее подтверждение, а не ранний pivot-сигнал.", force_overlay=true)
+
+if showTruth and barstate.isconfirmed and pricePivotConfirmed
+    label.new(bar_index - 2, pivotPrice, "PRICE PIVOT", yloc=yloc.belowbar, style=label.style_label_up, color=color.new(#546e7a, 35), textcolor=color.white, size=size.tiny, tooltip="Только историческая проверка. Этот price pivot стал известен через две свечи.", force_overlay=true)
+
+// =================================================================== панель
+var table panel = table.new(position.top_right, 2, 14, bgcolor=color.new(#0f172a, 5), frame_color=color.new(#64748b, 30), frame_width=1, border_color=color.new(#334155, 40), border_width=1, force_overlay=true)
+status(bool active) => active ? "ДА" : "—"
+statusColor(bool active) => active ? #00e676 : color.new(color.silver, 45)
+
+if barstate.islast
+    if showPanel
+        string tierText = tier == 3 ? "MAX" : tier == 2 ? "STRONG" : tier == 1 ? "CANDIDATE" : "ЖДЁМ"
+        table.cell(panel, 0, 0, "REVERSAL RADAR v2", text_color=color.white, bgcolor=#1e293b, text_size=size.small)
+        table.cell(panel, 1, 0, str.tostring(score) + "  " + tierText, text_color=tierColor, bgcolor=#1e293b, text_size=size.small)
+        table.cell(panel, 0, 1, "Капитуляция (1 балл)", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 1, status(capitulation), text_color=statusColor(capitulation), text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 2, "TD9", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 2, status(aTD), text_color=statusColor(aTD), text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 3, "Разворот Fisher/UO", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 3, status(oscillatorTurn), text_color=statusColor(oscillatorTurn), text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 4, "Ложный пробой SFP (+2)", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 4, status(sfpActive), text_color=statusColor(sfpActive), text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 5, "Фитиль / поглощение", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 5, status(wickActive or engulfActive), text_color=statusColor(wickActive or engulfActive), text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 6, "Выкуп объёмом", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 6, status(absorptionActive), text_color=statusColor(absorptionActive), text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 7, "ATR-кульминация", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 7, status(climaxActive), text_color=statusColor(climaxActive), text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 8, "Рядом поддержка", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 8, status(supportActive), text_color=statusColor(supportActive), text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 9, "Сильнее " + benchmark, text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 9, status(relativeActive), text_color=statusColor(relativeActive), text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 10, "Плохое закрытие (-2)", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 10, status(badClose), text_color=badClose ? #ff5252 : color.new(color.silver, 45), text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 11, "Price pivot ±1", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 11, pivotSignals > 0 ? str.tostring(pivotHitRate, "#.0") + "% (" + str.tostring(pivotHits) + "/" + str.tostring(pivotSignals) + ")" : "нет данных", text_color=color.white, text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 12, "Через 5 свечей", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 12, returnSignals > 0 ? str.tostring(avgReturn5, "#.##") + "% | + " + str.tostring(positiveRate5, "#.0") + "%" : "нет данных", text_color=color.white, text_halign=text.align_right, text_size=size.tiny)
+        table.cell(panel, 0, 13, "Текущая свеча", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+        table.cell(panel, 1, 13, barstate.isconfirmed ? "ЗАКРЫТА" : "НЕ ЗАКРЫТА", text_color=barstate.isconfirmed ? #00e676 : #ff9800, text_halign=text.align_right, text_size=size.tiny)
+    else
+        table.clear(panel, 0, 0, 1, 13)
+
+// =================================================================== алерты
+alertcondition(candidateSignal, title="RevRadar v2 CANDIDATE", message="Reversal Radar v2 CANDIDATE на {{ticker}} {{interval}}")
+alertcondition(strongSignal, title="RevRadar v2 STRONG", message="Reversal Radar v2 STRONG на {{ticker}} {{interval}}")
+alertcondition(maxSignal, title="RevRadar v2 MAX", message="Reversal Radar v2 MAX на {{ticker}} {{interval}}")
+alertcondition(nextBarConfirm, title="RevRadar v2 CONFIRM", message="Reversal Radar v2: следующая свеча подтвердила сигнал на {{ticker}} {{interval}}")
+
+if signal
+    alert("Reversal Radar v2 | score " + str.tostring(score) + " | " + reasons, alert.freq_once_per_bar_close)

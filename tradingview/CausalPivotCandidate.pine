@@ -1,0 +1,133 @@
+//@version=6
+// Causal RSI reversal candidates. Every signal is fixed on the CURRENT bar close.
+// No negative offsets, future bars, pivots with right bars, or security lookahead.
+indicator("Causal Pivot Pro", shorttitle="Causal Pivot Pro", overlay=false, max_labels_count=500)
+
+string GROUP_SIGNAL = "1. Signal logic"
+string GROUP_VIEW = "2. Visuals"
+
+rsiLength = input.int(14, "RSI length", minval=2, group=GROUP_SIGNAL, tooltip="Momentum oscillator. The tested default is 14.")
+watchLookback = input.int(45, "WATCH: RSI-low lookback", minval=10, group=GROUP_SIGNAL, tooltip="Frequent early warning. It is not a buy signal by itself.")
+buyLookback = input.int(60, "BUY: RSI-low lookback", minval=20, group=GROUP_SIGNAL, tooltip="Main signal: fresh RSI low + price above EMA 200 + volume confirmation.")
+strongLookback = input.int(90, "STRONG: RSI-low lookback", minval=30, group=GROUP_SIGNAL, tooltip="Most selective signal. It requires the deepest RSI extreme.")
+volumeLength = input.int(20, "Average volume length", minval=5, group=GROUP_SIGNAL)
+cooldownBars = input.int(2, "Cooldown bars", minval=0, group=GROUP_SIGNAL, tooltip="Suppresses repeated falling-knife signals from the same decline.")
+
+showWatch = input.bool(true, "Show WATCH dots", group=GROUP_VIEW)
+showBuy = input.bool(true, "Show BUY labels", group=GROUP_VIEW)
+showStrong = input.bool(true, "Show STRONG labels", group=GROUP_VIEW)
+showDashboard = input.bool(true, "Show explanation dashboard", group=GROUP_VIEW)
+showEma50 = input.bool(true, "Show EMA 50 on price", group=GROUP_VIEW)
+showEma100 = input.bool(false, "Show EMA 100 on price", group=GROUP_VIEW)
+showEma200 = input.bool(true, "Show EMA 200 on price", group=GROUP_VIEW)
+
+float rsi = ta.rsi(close, rsiLength)
+float ema50 = ta.ema(close, 50)
+float ema100 = ta.ema(close, 100)
+float ema200 = ta.ema(close, 200)
+float averageVolume = ta.sma(volume, volumeLength)
+float volumeRatio = averageVolume > 0 ? volume / averageVolume : na
+float rsiLow45 = ta.lowest(rsi, watchLookback)
+float rsiLow60 = ta.lowest(rsi, buyLookback)
+float rsiLow90 = ta.lowest(rsi, strongLookback)
+
+bool rsiFalling = rsi < rsi[1]
+bool fresh45 = not na(rsiLow45) and rsi <= rsiLow45 and rsiFalling
+bool fresh60 = not na(rsiLow60) and rsi <= rsiLow60 and rsiFalling
+bool fresh90 = not na(rsiLow90) and rsi <= rsiLow90 and rsiFalling
+bool trendOk = close > ema200
+bool volumeOk = volume >= averageVolume
+
+bool rawWatch = fresh45 and trendOk
+bool rawBuy = fresh60 and trendOk and volumeOk
+bool rawStrong = fresh90 and trendOk and volumeOk
+
+var int lastWatchBar = na
+var int lastBuyBar = na
+var int lastStrongBar = na
+bool watchCooldown = na(lastWatchBar) or bar_index - lastWatchBar > cooldownBars
+bool buyCooldown = na(lastBuyBar) or bar_index - lastBuyBar > cooldownBars
+bool strongCooldown = na(lastStrongBar) or bar_index - lastStrongBar > cooldownBars
+
+bool watchSignal = barstate.isconfirmed and rawWatch and watchCooldown
+bool buySignal = barstate.isconfirmed and rawBuy and buyCooldown
+bool strongSignal = barstate.isconfirmed and rawStrong and strongCooldown
+if watchSignal
+    lastWatchBar := bar_index
+if buySignal
+    lastBuyBar := bar_index
+if strongSignal
+    lastStrongBar := bar_index
+
+var string lastSignalName = "NONE"
+var int lastSignalIndex = na
+if watchSignal
+    lastSignalName := "WATCH"
+    lastSignalIndex := bar_index
+if buySignal
+    lastSignalName := "BUY 60"
+    lastSignalIndex := bar_index
+if strongSignal
+    lastSignalName := "STRONG 90"
+    lastSignalIndex := bar_index
+
+// ----- RSI pane
+color rsiColor = rsi <= 20 ? #ff5252 : rsi <= 30 ? #ff9800 : rsi >= 70 ? #ab47bc : #29b6f6
+upper = hline(70, "Overbought", color=color.new(#ef5350, 30))
+middle = hline(50, "Midline", color=color.new(color.gray, 65))
+lower = hline(30, "Oversold", color=color.new(#26a69a, 30))
+hline(20, "Deep oversold", color=color.new(#00c853, 55), linestyle=hline.style_dotted)
+fill(upper, middle, color=color.new(#ef5350, 94), title="Bearish RSI zone")
+fill(middle, lower, color=color.new(#90caf9, 96), title="Neutral RSI zone")
+plot(rsi, "RSI", color=rsiColor, linewidth=2)
+plot(rsi <= 30 ? rsi : na, "Oversold glow", color=color.new(#ffb300, 60), linewidth=6)
+bgcolor(strongSignal ? color.new(#00e676, 84) : buySignal ? color.new(#26a69a, 90) : na, title="Signal highlight")
+
+// ----- Price chart overlays
+plot(showEma50 ? ema50 : na, "EMA 50", color=#00bcd4, linewidth=2, force_overlay=true)
+plot(showEma100 ? ema100 : na, "EMA 100", color=#ff9800, linewidth=2, force_overlay=true)
+plot(showEma200 ? ema200 : na, "EMA 200", color=#ab47bc, linewidth=3, force_overlay=true)
+plotshape(showWatch and watchSignal and not buySignal, title="WATCH", style=shape.circle, location=location.belowbar, color=#29b6f6, size=size.tiny, force_overlay=true)
+
+string buyTooltip = "BUY 60 — сигнал на закрытой текущей свече\n• RSI: новый минимум за 60 свечей\n• Цена: выше EMA 200\n• Объём: не ниже среднего за 20 свечей\n• Это кандидат на следующий день, не гарантия"
+string strongTooltip = "STRONG 90 — сигнал на закрытой текущей свече\n• RSI: новый минимум за 90 свечей\n• Цена: выше EMA 200\n• Объём: подтверждён\n• Более редкий и строгий вариант BUY 60"
+if showBuy and buySignal and not strongSignal
+    label.new(bar_index, low, "BUY\n60", yloc=yloc.belowbar, color=#26a69a, style=label.style_label_up, textcolor=color.white, size=size.small, tooltip=buyTooltip, force_overlay=true)
+if showStrong and strongSignal
+    label.new(bar_index, low, "STRONG\n90", yloc=yloc.belowbar, color=#00e676, style=label.style_label_up, textcolor=color.black, size=size.normal, tooltip=strongTooltip, force_overlay=true)
+
+// ----- Live explanation dashboard
+string stateText = strongSignal ? "STRONG 90" : buySignal ? "BUY 60" : watchSignal ? "WATCH" : fresh45 ? "FILTERED" : "WAIT"
+string formingText = rawStrong ? "FORMING 90" : rawBuy ? "FORMING 60" : rawWatch ? "FORMING WATCH" : fresh45 ? "FILTERED" : "WAIT"
+string currentText = barstate.isconfirmed ? stateText : formingText
+bool formingNow = not barstate.isconfirmed and (rawStrong or rawBuy or rawWatch)
+color stateColor = rawStrong ? #00e676 : rawBuy ? #26a69a : rawWatch ? #29b6f6 : fresh45 ? #ff9800 : color.gray
+string rsiText = str.tostring(rsi, "#.0") + (fresh90 ? " | LOW 90" : fresh60 ? " | LOW 60" : fresh45 ? " | LOW 45" : "")
+string trendText = trendOk ? "PASS | above EMA 200" : "BLOCK | below EMA 200"
+string volumeText = (volumeOk ? "PASS | " : "BLOCK | ") + str.tostring(volumeRatio, "#.00") + "x"
+string lastText = lastSignalName == "NONE" ? "NONE" : lastSignalName + " | " + str.tostring(bar_index - lastSignalIndex) + " bars ago"
+var table dashboard = table.new(position.top_right, 2, 6, bgcolor=color.new(#111827, 8), frame_color=color.new(#64748b, 30), frame_width=1, border_color=color.new(#334155, 35), border_width=1, force_overlay=true)
+if barstate.islast
+    if showDashboard
+        table.cell(dashboard, 0, 0, "CAUSAL PIVOT", text_color=color.white, bgcolor=#1e293b, text_size=size.small)
+        table.cell(dashboard, 1, 0, currentText, text_color=stateColor, bgcolor=#1e293b, text_size=size.small)
+        table.cell(dashboard, 0, 1, "LAST", text_color=color.silver, text_halign=text.align_left)
+        table.cell(dashboard, 1, 1, lastText, text_color=color.white, text_halign=text.align_right)
+        table.cell(dashboard, 0, 2, "RSI", text_color=color.silver, text_halign=text.align_left)
+        table.cell(dashboard, 1, 2, rsiText, text_color=rsiColor, text_halign=text.align_right)
+        table.cell(dashboard, 0, 3, "TREND", text_color=color.silver, text_halign=text.align_left)
+        table.cell(dashboard, 1, 3, trendText, text_color=trendOk ? #00e676 : #ff5252, text_halign=text.align_right)
+        table.cell(dashboard, 0, 4, "VOLUME", text_color=color.silver, text_halign=text.align_left)
+        table.cell(dashboard, 1, 4, volumeText, text_color=volumeOk ? #00e676 : #ff9800, text_halign=text.align_right)
+        table.cell(dashboard, 0, 5, "MEANING", text_color=color.silver, text_halign=text.align_left)
+        table.cell(dashboard, 1, 5, currentText == "WAIT" ? "No new RSI extreme" : currentText == "FILTERED" ? "Trend/volume rejected" : formingNow ? "Wait for bar close" : "Signal fixed at close", text_color=color.white, text_halign=text.align_right)
+    else
+        table.clear(dashboard, 0, 0, 1, 5)
+
+alertcondition(watchSignal, title="WATCH causal pivot", message="WATCH: early causal pivot at the closed bar on {{ticker}} {{interval}}")
+alertcondition(buySignal, title="BUY 60 causal pivot", message="BUY 60: causal pivot confirmed at the closed bar on {{ticker}} {{interval}}")
+alertcondition(strongSignal, title="STRONG 90 causal pivot", message="STRONG 90: causal pivot confirmed at the closed bar on {{ticker}} {{interval}}")
+if strongSignal
+    alert("STRONG 90 | RSI=" + str.tostring(rsi, "#.0") + " | Volume=" + str.tostring(volumeRatio, "#.00") + "x", alert.freq_once_per_bar_close)
+else if buySignal
+    alert("BUY 60 | RSI=" + str.tostring(rsi, "#.0") + " | Volume=" + str.tostring(volumeRatio, "#.00") + "x", alert.freq_once_per_bar_close)

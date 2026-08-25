@@ -1,0 +1,107 @@
+//@version=6
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+// https://mozilla.org/MPL/2.0/
+// Divergence/fractal defaults follow the open-source VuManChu Cipher B implementation.
+indicator(
+     "VMC Cipher B Divergences",
+     shorttitle="VMC Separate Pane",
+     overlay=false)
+
+string GROUP_WT = "1. WaveTrend"
+string GROUP_DIV = "2. Divergences"
+string GROUP_MFI = "3. Money Flow"
+
+wtSource = input.source(hlc3, "WaveTrend source", group=GROUP_WT)
+wtChannelLen = input.int(9, "WT Channel Length", minval=3, group=GROUP_WT)
+wtAverageLen = input.int(12, "WT Average Length", minval=3, group=GROUP_WT)
+wtSignalLen = input.int(3, "WT Signal Length", minval=2, group=GROUP_WT)
+wtObLevel = input.float(53, "Overbought level 1", group=GROUP_WT)
+wtObLevel2 = input.float(60, "Overbought level 2", group=GROUP_WT)
+wtOsLevel = input.float(-53, "Oversold level 1", group=GROUP_WT)
+wtOsLevel2 = input.float(-60, "Oversold level 2", group=GROUP_WT)
+
+showRegularDiv = input.bool(true, "Show primary regular divergences", group=GROUP_DIV)
+showSecondDiv = input.bool(true, "Show secondary regular divergences", group=GROUP_DIV)
+showHiddenDiv = input.bool(false, "Show hidden divergences", group=GROUP_DIV)
+hiddenWithoutLimits = input.bool(true, "Hidden divergences without OB/OS limits", group=GROUP_DIV)
+wtDivObLevel = input.float(45, "Primary bearish divergence minimum", group=GROUP_DIV)
+wtDivOsLevel = input.float(-65, "Primary bullish divergence maximum", group=GROUP_DIV)
+wtDivObLevel2 = input.float(15, "Secondary bearish divergence minimum", group=GROUP_DIV)
+wtDivOsLevel2 = input.float(-40, "Secondary bullish divergence maximum", group=GROUP_DIV)
+
+mfiLength = input.int(60, "Money Flow period", minval=5, group=GROUP_MFI)
+mfiMultiplier = input.float(175, "Money Flow multiplier", minval=1, group=GROUP_MFI)
+mfiPosition = input.float(2.5, "Money Flow vertical offset", step=0.5, group=GROUP_MFI)
+
+f_top_fractal(source) =>
+    source[4] < source[2] and source[3] < source[2] and source[2] > source[1] and source[2] > source[0]
+
+f_bottom_fractal(source) =>
+    source[4] > source[2] and source[3] > source[2] and source[2] < source[1] and source[2] < source[0]
+
+f_find_divergences(source, topLimit, bottomLimit, useLimits) =>
+    topCondition = f_top_fractal(source) and (not useLimits or source[2] >= topLimit)
+    bottomCondition = f_bottom_fractal(source) and (not useLimits or source[2] <= bottomLimit)
+    fractalTop = topCondition ? source[2] : na
+    fractalBottom = bottomCondition ? source[2] : na
+
+    previousOscHigh = ta.valuewhen(topCondition, source[2], 0)[2]
+    previousPriceHigh = ta.valuewhen(topCondition, high[2], 0)[2]
+    previousOscLow = ta.valuewhen(bottomCondition, source[2], 0)[2]
+    previousPriceLow = ta.valuewhen(bottomCondition, low[2], 0)[2]
+
+    regularBear = topCondition and high[2] > previousPriceHigh and source[2] < previousOscHigh
+    regularBull = bottomCondition and low[2] < previousPriceLow and source[2] > previousOscLow
+    hiddenBear = topCondition and high[2] < previousPriceHigh and source[2] > previousOscHigh
+    hiddenBull = bottomCondition and low[2] > previousPriceLow and source[2] < previousOscLow
+    [fractalTop, fractalBottom, regularBear, regularBull, hiddenBear, hiddenBull]
+
+f_vmc() =>
+    esa = ta.ema(wtSource, wtChannelLen)
+    deviation = ta.ema(math.abs(wtSource - esa), wtChannelLen)
+    compositeIndex = deviation != 0 ? (wtSource - esa) / (0.015 * deviation) : 0.0
+    wt1 = ta.ema(compositeIndex, wtAverageLen)
+    wt2 = ta.sma(wt1, wtSignalLen)
+    wtVwap = wt1 - wt2
+
+    candleRange = high - low
+    rawMoneyFlow = candleRange != 0 ? ((close - open) / candleRange) * mfiMultiplier : 0.0
+    moneyFlow = ta.sma(rawMoneyFlow, mfiLength) - mfiPosition
+
+    [primaryTop, primaryBottom, primaryBear, primaryBull, primaryHiddenBear, primaryHiddenBull] = f_find_divergences(wt2, wtDivObLevel, wtDivOsLevel, true)
+    [secondTop, secondBottom, secondBear, secondBull, unusedSecondHiddenBear, unusedSecondHiddenBull] = f_find_divergences(wt2, wtDivObLevel2, wtDivOsLevel2, true)
+    [unusedTop, unusedBottom, unusedBear, unusedBull, noLimitHiddenBear, noLimitHiddenBull] = f_find_divergences(wt2, 0, 0, false)
+
+    hiddenBear = hiddenWithoutLimits ? noLimitHiddenBear : primaryHiddenBear
+    hiddenBull = hiddenWithoutLimits ? noLimitHiddenBull : primaryHiddenBull
+    regularBear = primaryBear or (showSecondDiv and secondBear)
+    regularBull = primaryBull or (showSecondDiv and secondBull)
+    [wt1, wt2, wtVwap, moneyFlow, primaryTop, primaryBottom, secondTop, secondBottom, primaryBear, primaryBull, secondBear, secondBull, hiddenBear, hiddenBull, regularBear, regularBull]
+
+[wt1, wt2, wtVwap, moneyFlow, primaryTop, primaryBottom, secondTop, secondBottom, primaryBear, primaryBull, secondBear, secondBull, hiddenBear, hiddenBull, regularBear, regularBull] = f_vmc()
+
+zeroPlot = plot(0, "Zero", color=color.new(color.white, 70))
+moneyFlowPlot = plot(moneyFlow, "VMC Money Flow", color=moneyFlow >= 0 ? color.lime : color.red, style=plot.style_area)
+fill(moneyFlowPlot, zeroPlot, color=moneyFlow >= 0 ? color.new(color.lime, 70) : color.new(color.red, 70), title="Money Flow fill")
+
+plot(wt1, "WT Wave 1", color=#90caf9, style=plot.style_area)
+plot(wt2, "WT Wave 2", color=color.new(#0d47a1, 20), style=plot.style_area)
+plot(wtVwap, "WT momentum difference", color=color.yellow, style=plot.style_area, linewidth=2)
+
+plot(wtObLevel, "Overbought 1", color=color.new(color.white, 65), style=plot.style_cross)
+plot(wtObLevel2, "Overbought 2", color=color.new(color.white, 65), style=plot.style_stepline)
+plot(wtOsLevel, "Oversold 1", color=color.new(color.white, 65), style=plot.style_cross)
+plot(wtOsLevel2, "Oversold 2", color=color.new(color.white, 65), style=plot.style_stepline)
+
+// Keep divergence arrows outside the WaveTrend waves so they remain clearly visible.
+plotshape(showRegularDiv and primaryBull, title="Primary regular bullish divergence", text="R+", style=shape.arrowup, location=location.bottom, offset=-2, color=color.lime, textcolor=color.lime, size=size.normal)
+plotshape(showRegularDiv and primaryBear, title="Primary regular bearish divergence", text="R-", style=shape.arrowdown, location=location.top, offset=-2, color=color.red, textcolor=color.red, size=size.normal)
+plotshape(showRegularDiv and showSecondDiv and secondBull, title="Secondary regular bullish divergence", text="R2+", style=shape.arrowup, location=location.bottom, offset=-2, color=color.new(color.lime, 25), textcolor=color.lime, size=size.small)
+plotshape(showRegularDiv and showSecondDiv and secondBear, title="Secondary regular bearish divergence", text="R2-", style=shape.arrowdown, location=location.top, offset=-2, color=color.new(color.red, 25), textcolor=color.red, size=size.small)
+plotshape(showHiddenDiv and hiddenBull, title="Hidden bullish divergence", text="H+", style=shape.arrowup, location=location.bottom, offset=-2, color=color.aqua, textcolor=color.aqua, size=size.small)
+plotshape(showHiddenDiv and hiddenBear, title="Hidden bearish divergence", text="H-", style=shape.arrowdown, location=location.top, offset=-2, color=color.orange, textcolor=color.orange, size=size.small)
+
+alertcondition(showRegularDiv and regularBull, title="VMC regular bullish divergence", message="Regular bullish VMC divergence on {{ticker}}")
+alertcondition(showRegularDiv and regularBear, title="VMC regular bearish divergence", message="Regular bearish VMC divergence on {{ticker}}")
+alertcondition(showHiddenDiv and hiddenBull, title="VMC hidden bullish divergence", message="Hidden bullish VMC divergence on {{ticker}}")
+alertcondition(showHiddenDiv and hiddenBear, title="VMC hidden bearish divergence", message="Hidden bearish VMC divergence on {{ticker}}")

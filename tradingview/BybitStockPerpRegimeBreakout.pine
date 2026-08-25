@@ -1,0 +1,128 @@
+//@version=6
+indicator(
+     "EMA 50/100/200 + Auto Levels + Fibonacci",
+     shorttitle="EMA Levels Fib",
+     overlay=true,
+     max_lines_count=20,
+     max_labels_count=20)
+
+// Price-chart indicator only. VuManChu is intentionally kept in a separate script/pane.
+
+string GROUP_EMA = "1. EMA"
+string GROUP_LEVELS = "2. Auto levels"
+string GROUP_FIB = "3. Automatic Fibonacci"
+
+showEmas = input.bool(true, "Show EMA 50 / 100 / 200", group=GROUP_EMA)
+emaSource = input.source(close, "EMA source", group=GROUP_EMA)
+ema50Len = input.int(50, "EMA 50 length", minval=2, group=GROUP_EMA)
+ema100Len = input.int(100, "EMA 100 length", minval=2, group=GROUP_EMA)
+ema200Len = input.int(200, "EMA 200 length", minval=2, group=GROUP_EMA)
+
+showAutoLevels = input.bool(true, "Show major auto levels", group=GROUP_LEVELS)
+levelsTf = input.timeframe("240", "Levels timeframe", group=GROUP_LEVELS)
+levelsLeft = input.int(5, "Swing bars left", minval=2, maxval=20, group=GROUP_LEVELS)
+levelsRight = input.int(5, "Swing bars right / confirmation", minval=2, maxval=20, group=GROUP_LEVELS)
+showPreviousLevels = input.bool(false, "Show previous high/low pair", group=GROUP_LEVELS)
+
+showAutoFib = input.bool(true, "Show automatic Fibonacci", group=GROUP_FIB)
+showFibLabels = input.bool(true, "Show Fibonacci ratio labels", group=GROUP_FIB)
+
+f_major_swings() =>
+    pivotHigh = ta.pivothigh(high, levelsLeft, levelsRight)
+    pivotLow = ta.pivotlow(low, levelsLeft, levelsRight)
+    lastHigh = ta.valuewhen(not na(pivotHigh), pivotHigh, 0)
+    previousHigh = ta.valuewhen(not na(pivotHigh), pivotHigh, 1)
+    lastLow = ta.valuewhen(not na(pivotLow), pivotLow, 0)
+    previousLow = ta.valuewhen(not na(pivotLow), pivotLow, 1)
+    lastHighTime = ta.valuewhen(not na(pivotHigh), time[levelsRight], 0)
+    lastLowTime = ta.valuewhen(not na(pivotLow), time[levelsRight], 0)
+    // The one-bar offset plus lookahead_on in the caller uses completed HTF bars only.
+    [lastHigh[1], previousHigh[1], lastLow[1], previousLow[1], lastHighTime[1], lastLowTime[1]]
+
+f_manage_line(existingLine, visible, x1, price, x2, lineColor, lineStyle, lineExtend, lineWidth) =>
+    managedLine = existingLine
+    valid = visible and not na(x1) and not na(x2) and not na(price)
+    if valid
+        if na(managedLine)
+            managedLine := line.new(x1, price, x2, price, xloc=xloc.bar_time, extend=lineExtend, color=lineColor, style=lineStyle, width=lineWidth)
+        else
+            line.set_xy1(managedLine, x1, price)
+            line.set_xy2(managedLine, x2, price)
+            line.set_extend(managedLine, lineExtend)
+            line.set_color(managedLine, lineColor)
+            line.set_style(managedLine, lineStyle)
+            line.set_width(managedLine, lineWidth)
+    else if not na(managedLine)
+        line.delete(managedLine)
+        managedLine := na
+    managedLine
+
+f_manage_label(existingLabel, visible, x, price, labelText, labelColor) =>
+    managedLabel = existingLabel
+    valid = visible and not na(x) and not na(price)
+    if valid
+        if na(managedLabel)
+            managedLabel := label.new(x, price, labelText, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.black, 100), textcolor=labelColor, size=size.tiny)
+        else
+            label.set_xy(managedLabel, x, price)
+            label.set_text(managedLabel, labelText)
+            label.set_textcolor(managedLabel, labelColor)
+    else if not na(managedLabel)
+        label.delete(managedLabel)
+        managedLabel := na
+    managedLabel
+
+ema50 = ta.ema(emaSource, ema50Len)
+ema100 = ta.ema(emaSource, ema100Len)
+ema200 = ta.ema(emaSource, ema200Len)
+
+plot(showEmas ? ema50 : na, "EMA 50", color=color.aqua, linewidth=2)
+plot(showEmas ? ema100 : na, "EMA 100", color=color.orange, linewidth=2)
+plot(showEmas ? ema200 : na, "EMA 200", color=color.fuchsia, linewidth=3)
+
+[majorHigh, previousMajorHigh, majorLow, previousMajorLow, majorHighTime, majorLowTime] = request.security(syminfo.tickerid, levelsTf, f_major_swings(), lookahead=barmerge.lookahead_on)
+
+fibValid = not na(majorHigh) and not na(majorLow) and not na(majorHighTime) and not na(majorLowTime) and majorHigh != majorLow
+fibUpSwing = fibValid and majorHighTime > majorLowTime
+fibAnchorTime = fibValid ? (fibUpSwing ? majorLowTime : majorHighTime) : na
+fibRange = fibValid ? math.abs(majorHigh - majorLow) : na
+fib0 = fibValid ? (fibUpSwing ? majorHigh : majorLow) : na
+fib382 = fibValid ? (fibUpSwing ? majorHigh - fibRange * 0.382 : majorLow + fibRange * 0.382) : na
+fib50 = fibValid ? (fibUpSwing ? majorHigh - fibRange * 0.5 : majorLow + fibRange * 0.5) : na
+fib618 = fibValid ? (fibUpSwing ? majorHigh - fibRange * 0.618 : majorLow + fibRange * 0.618) : na
+fib100 = fibValid ? (fibUpSwing ? majorLow : majorHigh) : na
+
+var line majorHighLine = na
+var line majorLowLine = na
+var line previousHighLine = na
+var line previousLowLine = na
+var line fib0Line = na
+var line fib382Line = na
+var line fib50Line = na
+var line fib618Line = na
+var line fib100Line = na
+var label fib0Label = na
+var label fib382Label = na
+var label fib50Label = na
+var label fib618Label = na
+var label fib100Label = na
+
+if barstate.islast
+    majorHighLine := f_manage_line(majorHighLine, showAutoLevels, time, majorHigh, time_close, color.new(color.red, 10), line.style_dashed, extend.both, 2)
+    majorLowLine := f_manage_line(majorLowLine, showAutoLevels, time, majorLow, time_close, color.new(color.lime, 10), line.style_dashed, extend.both, 2)
+    previousHighLine := f_manage_line(previousHighLine, showAutoLevels and showPreviousLevels, time, previousMajorHigh, time_close, color.new(color.red, 65), line.style_dotted, extend.both, 1)
+    previousLowLine := f_manage_line(previousLowLine, showAutoLevels and showPreviousLevels, time, previousMajorLow, time_close, color.new(color.lime, 65), line.style_dotted, extend.both, 1)
+
+    fibVisible = showAutoFib and fibValid
+    fib0Line := f_manage_line(fib0Line, fibVisible, fibAnchorTime, fib0, time_close, color.new(color.aqua, 35), line.style_solid, extend.right, 1)
+    fib382Line := f_manage_line(fib382Line, fibVisible, fibAnchorTime, fib382, time_close, color.new(color.aqua, 15), line.style_solid, extend.right, 1)
+    fib50Line := f_manage_line(fib50Line, fibVisible, fibAnchorTime, fib50, time_close, color.new(color.yellow, 5), line.style_solid, extend.right, 2)
+    fib618Line := f_manage_line(fib618Line, fibVisible, fibAnchorTime, fib618, time_close, color.new(color.orange, 5), line.style_solid, extend.right, 2)
+    fib100Line := f_manage_line(fib100Line, fibVisible, fibAnchorTime, fib100, time_close, color.new(color.aqua, 35), line.style_solid, extend.right, 1)
+
+    labelsVisible = fibVisible and showFibLabels
+    fib0Label := f_manage_label(fib0Label, labelsVisible, time_close, fib0, "Fib 0", color.aqua)
+    fib382Label := f_manage_label(fib382Label, labelsVisible, time_close, fib382, "Fib .382", color.aqua)
+    fib50Label := f_manage_label(fib50Label, labelsVisible, time_close, fib50, "Fib .5", color.yellow)
+    fib618Label := f_manage_label(fib618Label, labelsVisible, time_close, fib618, "Fib .618", color.orange)
+    fib100Label := f_manage_label(fib100Label, labelsVisible, time_close, fib100, "Fib 1", color.aqua)

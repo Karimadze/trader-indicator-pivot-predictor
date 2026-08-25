@@ -1,0 +1,158 @@
+//@version=6
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+// Open csRSI core: Copyright (C) 2017, WhenToTrade / Lars von Thienen.
+// MTF filtering, automatic signals and price-swing visualization implemented independently.
+indicator(
+     "Cyclic Smoothed RSI MTF — Open Replica",
+     shorttitle="csRSI MTF",
+     overlay=false,
+     max_bars_back=5000,
+     max_lines_count=200,
+     max_polylines_count=100)
+
+string GROUP_CRSI = "1. Cyclic Smoothed RSI"
+string GROUP_MTF = "2. Higher-timeframe filter"
+string GROUP_SIGNALS = "3. Signals on price"
+string GROUP_STYLE = "4. Style"
+
+sourceInput = input.source(close, "Source", group=GROUP_CRSI)
+dominantCycle = input.int(20, "Dominant cycle length", minval=10, maxval=100, group=GROUP_CRSI)
+vibration = input.int(10, "Vibration / smoothing", minval=2, maxval=30, group=GROUP_CRSI)
+leveling = input.float(10.0, "Adaptive band percentile", minval=1, maxval=40, step=0.5, group=GROUP_CRSI)
+
+useMtfFilter = input.bool(true, "Require higher-timeframe extreme", group=GROUP_MTF)
+filterTimeframe = input.timeframe("1D", "Filter timeframe", group=GROUP_MTF)
+filterDominantCycle = input.int(20, "Filter dominant cycle length", minval=10, maxval=100, group=GROUP_MTF)
+showMtfZones = input.bool(true, "Show red/green filter windows", group=GROUP_MTF)
+showMtfCurves = input.bool(false, "Show filter csRSI and bands", group=GROUP_MTF)
+
+showPriceArrows = input.bool(true, "Show arrows on price chart", group=GROUP_SIGNALS)
+showPaneArrows = input.bool(true, "Show arrows in csRSI pane", group=GROUP_SIGNALS)
+showSwingLines = input.bool(true, "Connect alternating price signals", group=GROUP_SIGNALS)
+showSwingAreas = input.bool(true, "Fill completed price swings", group=GROUP_SIGNALS)
+
+crsiColor = input.color(#ff5252, "csRSI line", group=GROUP_STYLE)
+bandColor = input.color(#00bcd4, "Adaptive bands", group=GROUP_STYLE)
+bullColor = input.color(#4caf50, "Bullish signals", group=GROUP_STYLE)
+bearColor = input.color(#ff3b30, "Bearish signals", group=GROUP_STYLE)
+
+f_csrsi(source, cycleInput, vibrationInput, levelingInput) =>
+    cycleLength = math.max(1, int(math.round(cycleInput / 2.0)))
+    cyclicMemory = cycleInput * 2
+    phasingLag = math.max(1, int(math.floor((vibrationInput - 1) / 2.0)))
+    torque = 2.0 / (vibrationInput + 1.0)
+
+    upward = ta.rma(math.max(ta.change(source), 0), cycleLength)
+    downward = ta.rma(-math.min(ta.change(source), 0), cycleLength)
+    rawRsi = downward == 0 ? 100.0 : upward == 0 ? 0.0 : 100.0 - 100.0 / (1.0 + upward / downward)
+
+    float cyclicRsi = na
+    cyclicRsi := torque * (2.0 * rawRsi - rawRsi[phasingLag]) + (1.0 - torque) * nz(cyclicRsi[1], rawRsi)
+
+    maximum = -1000000.0
+    minimum = 1000000.0
+    for index = 0 to cyclicMemory - 1
+        sample = nz(cyclicRsi[index], cyclicRsi)
+        maximum := math.max(maximum, sample)
+        minimum := math.min(minimum, sample)
+
+    stepSize = (maximum - minimum) / 100.0
+    percentile = levelingInput / 100.0
+    lowerBand = minimum
+    upperBand = maximum
+
+    for step = 0 to 100
+        testValue = minimum + stepSize * step
+        below = 0
+        for memoryIndex = 0 to cyclicMemory - 1
+            below += nz(cyclicRsi[memoryIndex], cyclicRsi) < testValue ? 1 : 0
+        if below * 1.0 / cyclicMemory >= percentile
+            lowerBand := testValue
+            break
+
+    for step = 0 to 100
+        testValue = maximum - stepSize * step
+        above = 0
+        for memoryIndex = 0 to cyclicMemory - 1
+            above += nz(cyclicRsi[memoryIndex], cyclicRsi) >= testValue ? 1 : 0
+        if above * 1.0 / cyclicMemory >= percentile
+            upperBand := testValue
+            break
+
+    [cyclicRsi, lowerBand, upperBand]
+
+f_confirmed_csrsi(source, cycleInput, vibrationInput, levelingInput) =>
+    [value, lower, upper] = f_csrsi(source, cycleInput, vibrationInput, levelingInput)
+    [value[1], lower[1], upper[1]]
+
+[crsi, lowBand, highBand] = f_csrsi(sourceInput, dominantCycle, vibration, leveling)
+[mtfCrsi, mtfLowBand, mtfHighBand] = request.security(
+     syminfo.tickerid,
+     filterTimeframe,
+     f_confirmed_csrsi(sourceInput, filterDominantCycle, vibration, leveling),
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_on)
+
+mtfOversold = not na(mtfCrsi) and mtfCrsi < mtfLowBand
+mtfOverbought = not na(mtfCrsi) and mtfCrsi > mtfHighBand
+
+zoneColor = mtfOverbought ? color.new(bearColor, 89) : mtfOversold ? color.new(bullColor, 89) : na
+bgcolor(showMtfZones ? zoneColor : na, title="Confirmed MTF extreme window")
+
+hline(80, "80", color=color.new(color.gray, 75), linestyle=hline.style_dotted)
+hline(50, "50", color=color.new(color.gray, 82), linestyle=hline.style_dashed)
+hline(20, "20", color=color.new(color.gray, 75), linestyle=hline.style_dotted)
+
+plot(crsi, "csRSI", color=crsiColor, linewidth=1)
+plot(lowBand, "Adaptive low band", color=bandColor, linewidth=1)
+plot(highBand, "Adaptive high band", color=bandColor, linewidth=1)
+plot(showMtfCurves ? mtfCrsi : na, "csRSI MTF", color=color.new(crsiColor, 35), linewidth=2)
+plot(showMtfCurves ? mtfLowBand : na, "Low band MTF", color=color.new(bandColor, 45), linewidth=2)
+plot(showMtfCurves ? mtfHighBand : na, "High band MTF", color=color.new(bandColor, 45), linewidth=2)
+
+// A turn is confirmed one bar after the local csRSI extremum.
+bullTurn = crsi[1] < crsi[2] and crsi > crsi[1] and crsi[1] <= lowBand[1]
+bearTurn = crsi[1] > crsi[2] and crsi < crsi[1] and crsi[1] >= highBand[1]
+bullFilter = not useMtfFilter or mtfOversold[1]
+bearFilter = not useMtfFilter or mtfOverbought[1]
+bullSignal = barstate.isconfirmed and bullTurn and bullFilter
+bearSignal = barstate.isconfirmed and bearTurn and bearFilter
+
+plotshape(showPaneArrows and bullSignal ? 10 : na, title="Bullish csRSI turn", text="▲", style=shape.labelup, location=location.absolute, offset=-1, color=color.new(bullColor, 100), textcolor=bullColor, size=size.small)
+plotshape(showPaneArrows and bearSignal ? 90 : na, title="Bearish csRSI turn", text="▼", style=shape.labeldown, location=location.absolute, offset=-1, color=color.new(bearColor, 100), textcolor=bearColor, size=size.small)
+
+plotshape(showPriceArrows and bullSignal, title="Bullish csRSI price signal", text="", style=shape.arrowup, location=location.belowbar, offset=-1, color=bullColor, size=size.small, force_overlay=true)
+plotshape(showPriceArrows and bearSignal, title="Bearish csRSI price signal", text="", style=shape.arrowdown, location=location.abovebar, offset=-1, color=bearColor, size=size.small, force_overlay=true)
+
+// The source screenshots used manually drawn price projections. Here they are automated:
+// a completed bullish-to-bearish leg is green; a bearish-to-bullish leg is red.
+newDirection = bullSignal ? 1 : bearSignal ? -1 : 0
+signalTime = time[1]
+signalPrice = bullSignal ? low[1] : bearSignal ? high[1] : na
+
+var int lastDirection = 0
+var int lastSignalTime = na
+var float lastSignalPrice = na
+var array<chart.point> swingPath = array.new<chart.point>()
+
+if newDirection != 0 and newDirection != lastDirection
+    if lastDirection != 0 and not na(lastSignalTime) and not na(lastSignalPrice)
+        completedColor = lastDirection == 1 ? bullColor : bearColor
+        if showSwingLines
+            line.new(lastSignalTime, lastSignalPrice, signalTime, signalPrice, xloc=xloc.bar_time, color=completedColor, width=2, force_overlay=true)
+        if showSwingAreas
+            array.push(swingPath, chart.point.from_time(signalTime, signalPrice))
+            if array.size(swingPath) >= 3
+                polyline.new(array.copy(swingPath), curved=false, closed=true, xloc=xloc.bar_time, line_color=color.new(completedColor, 40), fill_color=color.new(completedColor, 88), line_width=1, force_overlay=true)
+
+    array.clear(swingPath)
+    array.push(swingPath, chart.point.from_time(signalTime, signalPrice))
+    lastDirection := newDirection
+    lastSignalTime := signalTime
+    lastSignalPrice := signalPrice
+
+if lastDirection != 0
+    array.push(swingPath, chart.point.from_time(time, close))
+
+alertcondition(bullSignal, title="csRSI MTF bullish turn", message="Bullish csRSI turn inside confirmed MTF oversold window on {{ticker}}")
+alertcondition(bearSignal, title="csRSI MTF bearish turn", message="Bearish csRSI turn inside confirmed MTF overbought window on {{ticker}}")

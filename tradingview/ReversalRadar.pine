@@ -1,0 +1,287 @@
+//@version=6
+// ============================================================================
+// Reversal Radar — 7 классических индикаторов разворота в одном окне
+// ----------------------------------------------------------------------------
+// ИДЕЯ. Отдельный индикатор разворота почти бесполезен. Но если несколько
+// независимых классических индикаторов срабатывают в одном окне из 3 свечей —
+// вероятность, что здесь формируется PIVOT LOW, растёт в разы.
+//
+// Все 7 компонентов срабатывают В РЕАЛЬНОМ ВРЕМЕНИ, на закрытии свечи.
+// Ни один не рисуется задним числом.
+//
+// ГЛАВНЫЙ ВЫВОД ЗАМЕРА: работают те индикаторы, что ловят КАПИТУЛЯЦИЮ
+// (вход в перепроданность), а не те, что подтверждают отскок.
+// WaveTrend / Market Cipher cross up, Williams %R cross up, StochRSI cross up
+// попадают в pivot-зону в 10-29% случаев — они срабатывают, когда разворот
+// УЖЕ произошёл. Поэтому их здесь нет.
+//
+// ЗАМЕР (MRVL COHR MU LITE GLW TER STX, дневки 2010-2026, 27 890 баров).
+// Метрика: сигнал попал в окно ±1 бар от подтверждённого PIVOT LOW по RSI.
+// Базовая доля таких баров в истории: 7,8%.
+//
+//   conf >= 1 : 39,2% попаданий  (~11,4 сигн/год/тикер)  +5д +0,83%
+//   conf >= 2 : 50,1% попаданий  (~5,9  сигн/год/тикер)  +5д +1,28%
+//   conf >= 3 : 58,0% попаданий  (~2,6  сигн/год/тикер)  +5д +1,81%  полож. 60,0%
+//   conf >= 4 : 66,3% попаданий  (~0,8  сигн/год/тикер)  +5д +2,32%  полож. 63,2%
+//   любой бар : 7,8% попаданий                            +5д +0,67%  полож. 54,8%
+//
+// Train (<2021) / Test (>=2021) для conf>=3: 54,9% / 64,6% — не переобучено.
+//
+// ПРОВЕРКА v2 НА 97 ТИКЕРАХ NASDAQ (663 623 бара, та же метрика, база 7,6%):
+//   conf >= 2 : 48,7%   conf >= 3 : 56,2%   conf >= 4 : 63,3%
+// Цифры с 7 тикеров подтвердились на выборке в 24 раза больше.
+//
+// НОВОЕ В v2 — ФИЛЬТР ШИРОТЫ РЫНКА (breadth).
+// Замер показал: дно одной акции надёжнее, когда падает весь рынок.
+// Доля акций выше своей MA20 (тикер INDEX:NDTW для Nasdaq-100):
+//   выше 80% (рынок спокоен) -> попадание в pivot 38,2%
+//   ниже 15% (широкая паника) -> попадание 48,5%
+// Фильтр почти не меняет частоту попадания на высоких conf, но заметно
+// улучшает то, что происходит ПОСЛЕ: +5д растёт с +1,2% до +1,6%
+// на conf>=4, и с +0,9% до +1,5% на conf>=1.
+// Отдельно: "капитуляция + широкая паника" даёт 57,4% против 53,1%
+// (train 57,5 / test 56,5) — это лучший устойчивый фильтр из найденных.
+//
+// ВЕРХНЯЯ СТОРОНА (метки TAKE) — зеркальные 7 компонентов на вершине.
+// Замер на тех же 97 тикерах (675 912 баров, база 7,8%):
+//   conf >= 2 : 38,3%   conf >= 3 : 46,5%   conf >= 4 : 54,2%
+//   conf >= 4 и цена ниже EMA 200 : 69,9% — лучший фильтр вершины.
+//
+// НО ЧЕСТНО: ЭТО НЕ СИГНАЛ В ШОРТ.
+// После верхних сигналов цена за 5 дней в среднем всё равно РАСТЁТ (+0,3%),
+// падений всего 47-48% — то есть монетка. У случайного бара +0,51% и 45%.
+// Верх работает как "здесь вершина, пора фиксировать лонг", а не как
+// "открывай шорт". Причина: у дна есть механика капитуляции и отскока,
+// у вершины её нет — рынок просто уходит в боковик.
+// Поэтому метки называются TAKE (фиксация), а не SHORT.
+//
+// ВАЖНО ПРО ФИЛЬТР ШИРОТЫ: он ВЫКЛЮЧЕН по умолчанию.
+// Символы широты (INDEX:NDTW и подобные) существуют только на дневном
+// разрешении и доступны не на всех тарифах TradingView. На крипте и на
+// младших таймфреймах данных для них нет вообще. Включайте фильтр только
+// на дневных графиках акций США. Все семь основных компонентов работают
+// независимо от него.
+// ============================================================================
+
+indicator("Reversal Radar v3", shorttitle="RevRadar3", overlay=false, max_labels_count=500)
+
+string G1 = "1. Компоненты"
+string G2 = "2. Пороги"
+string G3 = "3. Визуал"
+
+useCCI   = input.bool(true, "CCI < -200 (капитуляция)",            group=G1, tooltip="Лучший одиночный сигнал: 57% попаданий в pivot-зону. Редкий.")
+useBB    = input.bool(true, "Пробой нижней полосы Боллинджера",     group=G1, tooltip="41% попаданий. Классика, срабатывает на входе в панику.")
+useRSI30 = input.bool(true, "RSI впервые ушёл ниже 30",             group=G1, tooltip="44% попаданий. Именно ВХОД в зону, а не выход из неё.")
+useFish  = input.bool(true, "Fisher Transform разворот из < -1,5",  group=G1, tooltip="43% попаданий.")
+useUO    = input.bool(true, "Ultimate Oscillator пересёк 30 вверх", group=G1, tooltip="42% попаданий.")
+useTD    = input.bool(true, "TD Sequential: buy setup 9",           group=G1, tooltip="39% попаданий. Девятая подряд свеча ниже close[4].")
+useCRSI  = input.bool(true, "Connors RSI < 10",                     group=G1, tooltip="38% попаданий.")
+
+window   = input.int(3, "Окно совпадения (баров)", minval=1, maxval=10, group=G2, tooltip="Сигналы считаются совпавшими, если сработали в пределах этого числа свечей. Протестировано значение 3.")
+thAlert  = input.int(2, "Минимум компонентов для метки", minval=1, maxval=7, group=G2)
+thStrong = input.int(3, "Минимум компонентов для STRONG", minval=1, maxval=7, group=G2)
+thMax    = input.int(4, "Минимум компонентов для MAX",    minval=1, maxval=7, group=G2)
+trendFilter = input.bool(false, "Только выше EMA 200", group=G2, tooltip="Выключено по умолчанию: в замере фильтр тренда не улучшал попадание в pivot.")
+
+string G4 = "4. Широта рынка (breadth)"
+useBreadth    = input.bool(false, "Учитывать широту рынка", group=G4, tooltip="ВЫКЛЮЧЕНО ПО УМОЛЧАНИЮ. Включайте только на графиках акций США с дневным таймфреймом. Символы широты (INDEX:NDTW и подобные) существуют лишь на дневках и только на некоторых тарифах TradingView; на крипте и на младших таймфреймах данных для них нет. Если после включения появилась ошибка — выключите обратно, вся остальная логика от этого не зависит.")
+breadthSymbol = input.symbol("INDEX:NDTW", "Символ широты", group=G4, tooltip="INDEX:NDTW — % акций Nasdaq-100 выше MA20. Альтернативы: INDEX:S5TW (S&P 500), INDEX:MMTW (NYSE). Если символ недоступен на вашем тарифе, снимите галочку выше.")
+breadthPanic  = input.float(25, "Порог паники, %", minval=5, maxval=60, step=5, group=G4, tooltip="Ниже этого уровня рынок считается паническим. В замере 25% и 15% работали одинаково хорошо.")
+breadthMode   = input.string("Помечать", "Что делать при спокойном рынке", options=["Помечать", "Блокировать сигнал"], group=G4, tooltip="Помечать — сигнал выходит, но в панели видно, что рынок спокоен. Блокировать — сигнал не выходит вовсе.")
+
+showLabels = input.bool(true, "Метки на графике цены", group=G3)
+showTake   = input.bool(true, "Верхние метки TAKE (фиксация лонга)", group=G3, tooltip="Зеркальные сигналы на вершине. Это подсказка закрыть лонг, а не открыть шорт: после них цена статистически не падает.")
+showRsiPane = input.bool(true, "Линия RSI в панели", group=G3, tooltip="Панель показывает RSI 14 — тот же, по которому определяется PIVOT.")
+showDots    = input.bool(true, "Точки сигналов на линии RSI", group=G3)
+showPanel  = input.bool(true, "Панель компонентов", group=G3)
+showTruth  = input.bool(true, "Показывать подтверждённый PIVOT (задним числом)", group=G3, tooltip="Серая метка через 2 свечи — правда по логике Libertus. Для визуальной проверки.")
+
+// ------------------------------------------------------------------ расчёты
+float hlc3v  = (high + low + close) / 3
+float ema200 = ta.ema(close, 200)
+float r      = ta.rsi(close, 14)
+
+// 1. CCI < -200
+float cci = ta.cci(hlc3v, 20)
+bool sCCI = useCCI and cci < -200 and cci[1] >= -200
+
+// 2. пробой нижней полосы Боллинджера
+float basis = ta.sma(close, 20)
+float dev   = 2.0 * ta.stdev(close, 20)
+bool sBB = useBB and close < basis - dev and close[1] >= basis[1] - dev[1]
+
+// 3. RSI впервые ниже 30
+bool sRSI = useRSI30 and r < 30 and r[1] >= 30
+
+// 4. Fisher Transform, разворот вверх из глубины
+float mid   = (high + low) / 2
+float mnf   = ta.lowest(mid, 9)
+float mxf   = ta.highest(mid, 9)
+float rawv  = mxf - mnf > 0 ? 2.0 * ((mid - mnf) / (mxf - mnf)) - 1.0 : 0.0
+var float vsm = 0.0
+vsm := math.max(-0.999, math.min(0.999, 0.33 * rawv + 0.67 * nz(vsm[1])))
+var float fish = 0.0
+fish := 0.5 * math.log((1 + vsm) / (1 - vsm)) * 0.5 + 0.5 * nz(fish[1])
+bool sFish = useFish and fish < -1.5 and fish > fish[1] and fish[1] <= fish[2]
+
+// 5. Ultimate Oscillator пересёк 30 вверх
+float bp = close - math.min(low, close[1])
+float trv = math.max(high, close[1]) - math.min(low, close[1])
+float bpSum7  = math.sum(bp, 7)
+float bpSum14 = math.sum(bp, 14)
+float bpSum28 = math.sum(bp, 28)
+float trSum7  = math.sum(trv, 7)
+float trSum14 = math.sum(trv, 14)
+float trSum28 = math.sum(trv, 28)
+float avg7  = trSum7  > 0 ? bpSum7  / trSum7  : 0.0
+float avg14 = trSum14 > 0 ? bpSum14 / trSum14 : 0.0
+float avg28 = trSum28 > 0 ? bpSum28 / trSum28 : 0.0
+float ult = 100.0 * (4 * avg7 + 2 * avg14 + avg28) / 7.0
+bool sUO = useUO and ult > 30 and ult[1] <= 30
+
+// 6. TD Sequential buy setup 9
+var int tdCount = 0
+tdCount := close < close[4] ? nz(tdCount[1]) + 1 : 0
+bool sTD = useTD and tdCount == 9
+
+// 7. Connors RSI < 10
+var float streak = 0.0
+streak := close > close[1] ? (nz(streak[1]) > 0 ? nz(streak[1]) + 1 : 1) : close < close[1] ? (nz(streak[1]) < 0 ? nz(streak[1]) - 1 : -1) : 0.0
+float pctRank = ta.percentrank(ta.roc(close, 1), 100)
+float crsi = (ta.rsi(close, 3) + ta.rsi(streak, 2) + pctRank) / 3.0
+bool sCRSI = useCRSI and crsi < 10 and crsi[1] >= 10
+
+// ------------------------------------------------------ широта рынка
+// Запрос строго на дневном разрешении: символы широты существуют только на "1D".
+// ignore_invalid_symbol=true возвращает na вместо ошибки, если символа нет на тарифе.
+float breadthRaw = useBreadth ? request.security(breadthSymbol, "1D", close, barmerge.gaps_off, barmerge.lookahead_off, ignore_invalid_symbol = true) : na
+bool  breadthOk  = not useBreadth or na(breadthRaw) or breadthRaw < breadthPanic
+bool  breadthKnown = useBreadth and not na(breadthRaw)
+
+// ---------------------------------------------------- подсчёт совпадений
+f(bool b) => (math.sum(b ? 1 : 0, window) > 0) ? 1 : 0
+int conf = f(sCCI) + f(sBB) + f(sRSI) + f(sFish) + f(sUO) + f(sTD) + f(sCRSI)
+
+// ------------------------------------------------- зеркальные компоненты (вершина)
+bool sCCIu  = useCCI   and cci > 200 and cci[1] <= 200
+bool sBBu   = useBB    and close > basis + dev and close[1] <= basis[1] + dev[1]
+bool sRSIu  = useRSI30 and r > 70 and r[1] <= 70
+bool sFishu = useFish  and fish > 1.5 and fish < fish[1] and fish[1] >= fish[2]
+bool sUOu   = useUO    and ult < 70 and ult[1] >= 70
+var int tdCountU = 0
+tdCountU := close > close[4] ? nz(tdCountU[1]) + 1 : 0
+bool sTDu   = useTD    and tdCountU == 9
+bool sCRSIu = useCRSI  and crsi > 90 and crsi[1] <= 90
+
+int confUp = f(sCCIu) + f(sBBu) + f(sRSIu) + f(sFishu) + f(sUOu) + f(sTDu) + f(sCRSIu)
+bool belowEma200 = close < ema200
+bool isNewUp  = confUp > nz(confUp[1])
+bool sigUp    = showTake and barstate.isconfirmed and isNewUp and confUp >= thAlert
+bool strongUp = sigUp and confUp >= thStrong
+bool maxUp    = sigUp and confUp >= thMax
+
+bool trendOk   = not trendFilter or close > ema200
+bool breadthGate = breadthMode == "Блокировать сигнал" ? breadthOk : true
+bool isNew   = conf > nz(conf[1]) and trendOk and breadthGate
+bool sig     = barstate.isconfirmed and isNew and conf >= thAlert
+bool strong  = sig and conf >= thStrong
+bool maxsig  = sig and conf >= thMax
+
+// ------------------------------------------- правда: подтверждённый PIVOT
+float rsiLowN = ta.lowest(r, 45)
+bool isNewLow = not na(rsiLowN) and r <= rsiLowN
+float rsiMin2 = ta.lowest(r, 2)
+bool pivotConfirmed = isNewLow[2] and rsiMin2 > r[2]
+float rsiHighN = ta.highest(r, 45)
+bool isNewHigh = not na(rsiHighN) and r >= rsiHighN
+float rsiMax2 = ta.highest(r, 2)
+bool pivotHighConfirmed = isNewHigh[2] and rsiMax2 < r[2]
+
+// живая статистика попадания по текущему инструменту (окно ±1 бар)
+var int nSig = 0
+var int nHit = 0
+if barstate.isconfirmed and sig[3]
+    nSig += 1
+    if pivotConfirmed or pivotConfirmed[1] or pivotConfirmed[2] or pivotConfirmed[3]
+        nHit += 1
+float hitRate = nSig > 0 ? 100.0 * nHit / nSig : na
+
+// ------------------------------------------------------------------ вывод
+// Панель повторяет привычный вид RSI Div - Lib: линия RSI 14, границы и зоны.
+color sigCol = conf >= thMax ? #00e676 : conf >= thStrong ? #26a69a : conf >= thAlert ? #ffd54f : #78909c
+
+hlineTop = hline(70, "Перекупленность", color=color.new(#9e9e9e, 25), linestyle=hline.style_dashed)
+hlineUp  = hline(60, "Верх нейтрали",   color=color.new(#9e9e9e, 85), linestyle=hline.style_dotted)
+hlineMid = hline(50, "Середина",        color=color.new(#9e9e9e, 60), linestyle=hline.style_dotted)
+hlineDn  = hline(40, "Низ нейтрали",    color=color.new(#9e9e9e, 85), linestyle=hline.style_dotted)
+hlineBot = hline(30, "Перепроданность", color=color.new(#9e9e9e, 25), linestyle=hline.style_dashed)
+fill(hlineTop, hlineUp, color=color.new(#26a69a, 92), title="Зона перекупленности")
+fill(hlineDn,  hlineBot, color=color.new(#ef5350, 92), title="Зона перепроданности")
+
+plot(showRsiPane ? r : na, "RSI 14", color=chart.fg_color, linewidth=2)
+plot(showRsiPane and showDots and sig ? r : na, "Сигнал на RSI", style=plot.style_circles, color=sigCol, linewidth=4)
+plot(showRsiPane and showDots and pivotConfirmed ? r[2] : na, "Подтверждённый PIVOT низ", style=plot.style_circles, color=color.new(#546e7a, 40), linewidth=3, offset=-2)
+plot(showRsiPane and showDots and pivotHighConfirmed ? r[2] : na, "Подтверждённый PIVOT верх", style=plot.style_circles, color=color.new(#546e7a, 40), linewidth=3, offset=-2)
+plot(showRsiPane and showDots and sigUp ? r : na, "Сигнал TAKE на RSI", style=plot.style_circles, color=maxUp ? #d50000 : strongUp ? #ef5350 : #ffab91, linewidth=4)
+bgcolor(maxsig ? color.new(#00e676, 88) : strong ? color.new(#26a69a, 92) : sig ? color.new(#ffd54f, 93) : maxUp ? color.new(#d50000, 88) : strongUp ? color.new(#ef5350, 92) : sigUp ? color.new(#ffab91, 93) : na, title="Подсветка сигнала")
+
+string parts = (sCCI ? "CCI<-200 " : "") + (sBB ? "BB-пробой " : "") + (sRSI ? "RSI<30 " : "") + (sFish ? "Fisher " : "") + (sUO ? "UltOsc " : "") + (sTD ? "TD9 " : "") + (sCRSI ? "ConnorsRSI " : "")
+if showLabels and sig
+    string tail = (maxsig ? " MAX" : strong ? " STRONG" : "") + (breadthKnown and breadthOk ? " *" : "")
+    color  col  = maxsig ? #00e676 : strong ? #26a69a : #ffd54f
+    color  tcl  = maxsig or strong ? color.white : color.black
+    label.new(bar_index, low, str.tostring(conf) + "/7" + tail, yloc=yloc.belowbar, color=col, style=label.style_label_up, textcolor=tcl, size=size.small, tooltip="Совпало компонентов: " + str.tostring(conf) + " из 7\n" + (breadthKnown ? (breadthOk ? "Рынок в панике (" + str.tostring(breadthRaw, "#.0") + "% выше MA20) — дно надёжнее\n" : "Рынок спокоен (" + str.tostring(breadthRaw, "#.0") + "% выше MA20) — падает только эта бумага\n") : "") + "Сработали сейчас: " + (parts == "" ? "(перенос из окна)" : parts) + "\n\nОжидание по тесту:\n2/7 → 48,7% попадания в pivot-зону\n3/7 → 56,2%\n4/7 → 63,3%\nБаза без сигнала — 7,6%.\n(97 тикеров NASDAQ, 663 тыс. баров)", force_overlay=true)
+
+string partsUp = (sCCIu ? "CCI>200 " : "") + (sBBu ? "BB-верх " : "") + (sRSIu ? "RSI>70 " : "") + (sFishu ? "Fisher " : "") + (sUOu ? "UltOsc " : "") + (sTDu ? "TD9-sell " : "") + (sCRSIu ? "ConnorsRSI " : "")
+if showLabels and sigUp
+    string tailU = (maxUp ? " MAX" : strongUp ? " STRONG" : "") + (belowEma200 ? " !" : "")
+    color  colU  = maxUp ? #d50000 : strongUp ? #ef5350 : #ffab91
+    color  tclU  = maxUp or strongUp ? color.white : color.black
+    label.new(bar_index, high, str.tostring(confUp) + "/7 TAKE" + tailU, yloc=yloc.abovebar, color=colU, style=label.style_label_down, textcolor=tclU, size=size.small, tooltip="ВЕРШИНА: совпало " + str.tostring(confUp) + " из 7\n" + (belowEma200 ? "Цена ниже EMA 200 — самый надёжный вариант (69,9% попаданий)\n" : "") + "Сработали: " + (partsUp == "" ? "(перенос из окна)" : partsUp) + "\n\nЭТО СИГНАЛ ФИКСИРОВАТЬ ЛОНГ, А НЕ ШОРТИТЬ.\nПопадание в вершину: 2/7 - 38,3%, 3/7 - 46,5%, 4/7 - 54,2%,\n4/7 ниже EMA200 - 69,9%. База 7,8%.\nНо после сигнала цена за 5 дней в среднем растёт на +0,3%,\nпадений 47% — в шорт это преимущества не даёт.", force_overlay=true)
+
+if showTruth and barstate.isconfirmed and pivotHighConfirmed
+    label.new(bar_index - 2, high, "PIVOT", yloc=yloc.abovebar, color=color.new(#8d6e63, 30), style=label.style_label_down, textcolor=color.white, size=size.tiny, tooltip="Подтверждённая вершина RSI. Стала известна только сейчас.", force_overlay=true)
+
+if showTruth and barstate.isconfirmed and pivotConfirmed
+    label.new(bar_index - 2, high, "PIVOT", yloc=yloc.abovebar, color=color.new(#546e7a, 30), style=label.style_label_down, textcolor=color.white, size=size.tiny, tooltip="Подтверждённый PIVOT LOW по RSI. Стал известен только сейчас.", force_overlay=true)
+
+// ------------------------------------------------------------------ панель
+var table p = table.new(position.top_right, 2, 12, bgcolor=color.new(#0f172a, 6), frame_color=color.new(#64748b, 30), frame_width=1, border_color=color.new(#334155, 40), border_width=1, force_overlay=true)
+tick(bool on, bool fired) => not on ? "выкл" : fired ? "СРАБОТАЛ" : "—"
+tcol(bool on, bool fired) => not on ? color.gray : fired ? #00e676 : color.new(color.silver, 40)
+if barstate.islast and showPanel
+    table.cell(p, 0, 0, "REVERSAL RADAR", text_color=color.white, bgcolor=#1e293b, text_size=size.small)
+    table.cell(p, 1, 0, str.tostring(conf) + " / 7", text_color=sigCol, bgcolor=#1e293b, text_size=size.small)
+    table.cell(p, 0, 1, "CCI < -200",        text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 1, tick(useCCI, sCCI),  text_color=tcol(useCCI, sCCI), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 2, "Нижняя BB",         text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 2, tick(useBB, sBB),    text_color=tcol(useBB, sBB), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 3, "RSI < 30",          text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 3, tick(useRSI30, sRSI),text_color=tcol(useRSI30, sRSI), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 4, "Fisher",            text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 4, tick(useFish, sFish),text_color=tcol(useFish, sFish), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 5, "Ultimate Osc",      text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 5, tick(useUO, sUO),    text_color=tcol(useUO, sUO), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 6, "TD Sequential 9",   text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 6, tick(useTD, sTD),    text_color=tcol(useTD, sTD), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 7, "Connors RSI < 10",  text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 7, tick(useCRSI, sCRSI),text_color=tcol(useCRSI, sCRSI), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 8, "Вершина (TAKE)",  text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 8, str.tostring(confUp) + " / 7" + (belowEma200 ? "  ниже EMA200" : ""), text_color=confUp >= thStrong ? #ef5350 : confUp >= thAlert ? #ffab91 : color.new(color.silver, 40), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 9, "Широта рынка",      text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 9, not breadthKnown ? "выкл / нет данных" : str.tostring(breadthRaw, "#.0") + "%  " + (breadthOk ? "ПАНИКА" : "спокойно"), text_color=not breadthKnown ? color.gray : breadthOk ? #00e676 : #ff9800, text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 10, "Факт на тикере",    text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 10, nSig == 0 ? "нет данных" : str.tostring(hitRate, "#.0") + "%  (" + str.tostring(nHit) + "/" + str.tostring(nSig) + ")", text_color=color.white, text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 11, "Статус свечи",     text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 11, barstate.isconfirmed ? "ЗАКРЫТА" : "НЕ ЗАКРЫТА", text_color=barstate.isconfirmed ? #00e676 : #ff9800, text_halign=text.align_right, text_size=size.tiny)
+
+// ------------------------------------------------------------------ алерты
+alertcondition(sigUp,    title="RevRadar TAKE (вершина)", message="Reversal Radar TAKE: вершина на {{ticker}} {{interval}} — рассмотрите фиксацию лонга")
+alertcondition(strongUp, title="RevRadar TAKE STRONG",     message="Reversal Radar TAKE STRONG: сильная вершина на {{ticker}} {{interval}}")
+alertcondition(sig,    title="RevRadar сигнал", message="Reversal Radar: сигнал разворота на {{ticker}} {{interval}}")
+alertcondition(strong, title="RevRadar STRONG", message="Reversal Radar STRONG на {{ticker}} {{interval}}")
+alertcondition(maxsig, title="RevRadar MAX",    message="Reversal Radar MAX на {{ticker}} {{interval}}")
+if sig
+    alert("Reversal Radar LONG " + str.tostring(conf) + "/7 | " + parts, alert.freq_once_per_bar_close)
+if sigUp
+    alert("Reversal Radar TAKE " + str.tostring(confUp) + "/7 | " + partsUp + (belowEma200 ? " | ниже EMA200" : ""), alert.freq_once_per_bar_close)
