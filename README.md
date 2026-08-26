@@ -19,7 +19,7 @@
   - README на русском для каждого индикатора — рядом в этой же папке.
 
 - **`research/`** — весь путь к результатам: Python-скрипты, которыми всё было измерено (без TradingView, только stdlib/pandas), и отчёты в Markdown с цифрами:
-  - `REPORT_RU.md`, `PIVOT_ANATOMY_RU.md`, `BREADTH_REPORT_RU.md`, `VMC_EMA_EXTENDED_REPORT_RU.md`, `BYBIT_2Y_COMBO_REPORT_RU.md` — отчёты по каждому этапу исследования.
+  - `REPORT_RU.md`, `PIVOT_ANATOMY_RU.md`, `BREADTH_REPORT_RU.md`, `VMC_EMA_EXTENDED_REPORT_RU.md`, `BYBIT_2Y_COMBO_REPORT_RU.md` — отчёты по каждому этапу исследования; `COMPETITOR_REVIEW_RU.md` — обзор похожих проектов на GitHub и сравнение по опубликованной точности.
   - Скрипты для воспроизведения: `realtime_pivot_predictor_study.py`, `reversal_radar_study.py`, `pivot_anatomy_study.py`, `breadth_study.py`, `divergence_study.py`, `bybit_two_year_combo_search.py` и другие.
   - CSV с данными для 7 стартовых тикеров (`divergence_data/`) и снапшот волатильности Bybit (`bybit_volatility_snapshot.csv`, `bybit_volatility_confirmed.csv`) — чтобы можно было пересчитать результаты без похода за новыми данными.
 
