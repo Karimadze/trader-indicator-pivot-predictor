@@ -83,6 +83,22 @@ thStrong = input.int(3, "Минимум компонентов для STRONG", m
 thMax    = input.int(4, "Минимум компонентов для MAX",    minval=1, maxval=7, group=G2)
 trendFilter = input.bool(false, "Только выше EMA 200", group=G2, tooltip="Выключено по умолчанию: в замере фильтр тренда не улучшал попадание в pivot.")
 
+// ============================================================================
+// ДОБАВЛЕНО 26.08.2026 — три условия, проверенные бэктестом на топ-5 волатильных
+// TradFi/xStock перпетуалах Bybit (5м, 779 сигналов conf>=3, весь депозит x1
+// без стопа, TP +1%):
+//   без доп.фильтров            : итог -44.5% (застревает в одной обвальной сделке)
+//   + свечной паттерн разворота : -0.5%  (сам по себе)
+//   + подтв. свеча + свеча      : +34.0%, 33 из 33 сделок дошли до тейка, 0 зависших
+// Дивергенцию, funding rate и открытый интерес проверяли отдельно — либо не дают
+// прироста поверх этой связки, либо (ОИ на этих тонких инструментах) слишком шумные.
+// ============================================================================
+string G3b = "3b. Валидированные бэктестом фильтры входа"
+useDeepDD        = input.bool(true, "Фильтр жёсткой просадки (цена ниже EMA200)", group=G3b, tooltip="Обязательное условие всей нашей бэктест-выборки: цена сигнальной свечи должна быть минимум на ddThreshold% ниже своей EMA200. Без этого условия качество сигналов сильно хуже.")
+ddThreshold      = input.float(1.0, "Мин. просадка от EMA200, %", minval=0.0, maxval=20.0, step=0.1, group=G3b)
+useCandlePattern = input.bool(true, "Требовать свечной паттерн разворота (молот / бычье поглощение)", group=G3b, tooltip="Лучший одиночный фильтр по бэктесту: один только он довёл модель с -44.5% до -0.5% на 779 сигналах.")
+useConfirmBar    = input.bool(true, "Входить не на сигнальной свече, а на следующей (подтверждение)", group=G3b, tooltip="Вход откладывается на 1 свечу: она должна закрыться зелёной и обновить хай сигнальной свечи. В паре со свечным паттерном дал лучший результат бэктеста: +34.0%, 33/33 сделок в тейк.")
+
 string G4 = "4. Широта рынка (breadth)"
 useBreadth    = input.bool(false, "Учитывать широту рынка", group=G4, tooltip="ВЫКЛЮЧЕНО ПО УМОЛЧАНИЮ. Включайте только на графиках акций США с дневным таймфреймом. Символы широты (INDEX:NDTW и подобные) существуют лишь на дневках и только на некоторых тарифах TradingView; на крипте и на младших таймфреймах данных для них нет. Если после включения появилась ошибка — выключите обратно, вся остальная логика от этого не зависит.")
 breadthSymbol = input.symbol("INDEX:NDTW", "Символ широты", group=G4, tooltip="INDEX:NDTW — % акций Nasdaq-100 выше MA20. Альтернативы: INDEX:S5TW (S&P 500), INDEX:MMTW (NYSE). Если символ недоступен на вашем тарифе, снимите галочку выше.")
@@ -187,6 +203,27 @@ bool sig     = barstate.isconfirmed and isNew and conf >= thAlert
 bool strong  = sig and conf >= thStrong
 bool maxsig  = sig and conf >= thMax
 
+// ------------------------------------------------ валидированные бэктестом фильтры
+float distEma200 = (na(ema200) or ema200 == 0) ? na : (close / ema200 - 1) * 100
+bool  deepDDOk    = not useDeepDD or (not na(distEma200) and distEma200 <= -ddThreshold)
+
+float candleRangeV = high - low
+float safeRangeV   = math.max(candleRangeV, syminfo.mintick)
+float lowerWickV   = math.min(open, close) - low
+float wickPartV    = lowerWickV / safeRangeV
+float bodyV        = math.abs(close - open)
+bool  isHammer      = wickPartV > 0.5 and (bodyV / safeRangeV) < 0.4
+bool  isBullEngulf  = close > open and open <= close[1] and close >= open[1]
+bool  candlePatternOk = isHammer or isBullEngulf
+bool  candleOk        = not useCandlePattern or candlePatternOk
+
+// сигнал-кандидат: базовый conf>=thAlert плюс фильтры, проверяемые НА сигнальной свече
+bool candidateValidated = sig and deepDDOk and candleOk
+
+// подтверждающая свеча проверяется на СЛЕДУЮЩЕЙ свече после кандидата
+bool confirmBarNow   = close > open and high >= high[1]
+bool entryValidated  = useConfirmBar ? (candidateValidated[1] and confirmBarNow) : candidateValidated
+
 // ------------------------------------------- правда: подтверждённый PIVOT
 float rsiLowN = ta.lowest(r, 45)
 bool isNewLow = not na(rsiLowN) and r <= rsiLowN
@@ -232,6 +269,9 @@ if showLabels and sig
     color  tcl  = maxsig or strong ? color.white : color.black
     label.new(bar_index, low, str.tostring(conf) + "/7" + tail, yloc=yloc.belowbar, color=col, style=label.style_label_up, textcolor=tcl, size=size.small, tooltip="Совпало компонентов: " + str.tostring(conf) + " из 7\n" + (breadthKnown ? (breadthOk ? "Рынок в панике (" + str.tostring(breadthRaw, "#.0") + "% выше MA20) — дно надёжнее\n" : "Рынок спокоен (" + str.tostring(breadthRaw, "#.0") + "% выше MA20) — падает только эта бумага\n") : "") + "Сработали сейчас: " + (parts == "" ? "(перенос из окна)" : parts) + "\n\nОжидание по тесту:\n2/7 → 48,7% попадания в pivot-зону\n3/7 → 56,2%\n4/7 → 63,3%\nБаза без сигнала — 7,6%.\n(97 тикеров NASDAQ, 663 тыс. баров)", force_overlay=true)
 
+if showLabels and entryValidated
+    label.new(bar_index, low, "ENTRY " + str.tostring(conf) + "/7", yloc=yloc.belowbar, style=label.style_label_up, color=#00c853, textcolor=color.white, size=size.normal, tooltip="Прошёл валидированные бэктестом фильтры:\n" + (useDeepDD ? "OK Просадка от EMA200 >= " + str.tostring(ddThreshold, "#.#") + "%\n" : "") + (useCandlePattern ? "OK Свечной паттерн разворота (молот/поглощение)\n" : "") + (useConfirmBar ? "OK Подтверждающая свеча (закрылась выше хая сигнальной)\n" : "") + "\nБэктест (5м, топ-5 волатильных, весь депозит x1 без стопа):\nбез фильтров: -44.5% -> с этой связкой: +34.0% (33/33 в тейк)", force_overlay=true)
+
 string partsUp = (sCCIu ? "CCI>200 " : "") + (sBBu ? "BB-верх " : "") + (sRSIu ? "RSI>70 " : "") + (sFishu ? "Fisher " : "") + (sUOu ? "UltOsc " : "") + (sTDu ? "TD9-sell " : "") + (sCRSIu ? "ConnorsRSI " : "")
 if showLabels and sigUp
     string tailU = (maxUp ? " MAX" : strongUp ? " STRONG" : "") + (belowEma200 ? " !" : "")
@@ -246,7 +286,7 @@ if showTruth and barstate.isconfirmed and pivotConfirmed
     label.new(bar_index - 2, high, "PIVOT", yloc=yloc.abovebar, color=color.new(#546e7a, 30), style=label.style_label_down, textcolor=color.white, size=size.tiny, tooltip="Подтверждённый PIVOT LOW по RSI. Стал известен только сейчас.", force_overlay=true)
 
 // ------------------------------------------------------------------ панель
-var table p = table.new(position.top_right, 2, 12, bgcolor=color.new(#0f172a, 6), frame_color=color.new(#64748b, 30), frame_width=1, border_color=color.new(#334155, 40), border_width=1, force_overlay=true)
+var table p = table.new(position.top_right, 2, 16, bgcolor=color.new(#0f172a, 6), frame_color=color.new(#64748b, 30), frame_width=1, border_color=color.new(#334155, 40), border_width=1, force_overlay=true)
 tick(bool on, bool fired) => not on ? "выкл" : fired ? "СРАБОТАЛ" : "—"
 tcol(bool on, bool fired) => not on ? color.gray : fired ? #00e676 : color.new(color.silver, 40)
 if barstate.islast and showPanel
@@ -274,6 +314,14 @@ if barstate.islast and showPanel
     table.cell(p, 1, 10, nSig == 0 ? "нет данных" : str.tostring(hitRate, "#.0") + "%  (" + str.tostring(nHit) + "/" + str.tostring(nSig) + ")", text_color=color.white, text_halign=text.align_right, text_size=size.tiny)
     table.cell(p, 0, 11, "Статус свечи",     text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
     table.cell(p, 1, 11, barstate.isconfirmed ? "ЗАКРЫТА" : "НЕ ЗАКРЫТА", text_color=barstate.isconfirmed ? #00e676 : #ff9800, text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 12, "Просадка от EMA200", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 12, na(distEma200) ? "н/д" : str.tostring(distEma200, "#.##") + "%" + (deepDDOk ? "  OK" : "  мало"), text_color=deepDDOk ? #00e676 : color.new(color.silver, 40), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 13, "Свечной паттерн",   text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 13, tick(useCandlePattern, candlePatternOk), text_color=tcol(useCandlePattern, candlePatternOk), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 14, "Подтв. свеча (тек.)", text_color=color.silver, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 14, tick(useConfirmBar, confirmBarNow), text_color=tcol(useConfirmBar, confirmBarNow), text_halign=text.align_right, text_size=size.tiny)
+    table.cell(p, 0, 15, "ВХОД (все фильтры)", text_color=color.white, text_halign=text.align_left, text_size=size.tiny)
+    table.cell(p, 1, 15, entryValidated ? "ДА, СЕЙЧАС" : "-", text_color=entryValidated ? #00c853 : color.new(color.silver, 40), text_halign=text.align_right, text_size=size.tiny)
 
 // ------------------------------------------------------------------ алерты
 alertcondition(sigUp,    title="RevRadar TAKE (вершина)", message="Reversal Radar TAKE: вершина на {{ticker}} {{interval}} — рассмотрите фиксацию лонга")
@@ -281,6 +329,9 @@ alertcondition(strongUp, title="RevRadar TAKE STRONG",     message="Reversal Rad
 alertcondition(sig,    title="RevRadar сигнал", message="Reversal Radar: сигнал разворота на {{ticker}} {{interval}}")
 alertcondition(strong, title="RevRadar STRONG", message="Reversal Radar STRONG на {{ticker}} {{interval}}")
 alertcondition(maxsig, title="RevRadar MAX",    message="Reversal Radar MAX на {{ticker}} {{interval}}")
+alertcondition(entryValidated, title="RevRadar ENTRY (валидировано)", message="Reversal Radar: ВХОД подтверждён бэктест-фильтрами на {{ticker}} {{interval}}")
+if entryValidated
+    alert("Reversal Radar ENTRY validated | " + str.tostring(conf) + "/7", alert.freq_once_per_bar_close)
 if sig
     alert("Reversal Radar LONG " + str.tostring(conf) + "/7 | " + parts, alert.freq_once_per_bar_close)
 if sigUp

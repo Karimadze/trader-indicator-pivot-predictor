@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .DS_Store
 *.log
+*.bak
+*.bak_*
+scanner/radar_state.json
+scanner/radar_volatility.json
+scanner/radar_signals.csv
